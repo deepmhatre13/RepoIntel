@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Runtime database (machine-specific; migrations live in ./alembic)
+repointel.db
+*.sqlite3
+*.db
+
+# Leaf/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Generated output / temp clones / logs
+output/
+*.log
+repointel_clone_*/
+_tmp*/
+
+# Local dev scratch files
+_*.py

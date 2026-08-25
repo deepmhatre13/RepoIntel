@@ -1,0 +1,11 @@
+{
+  "dataset": "python_library",
+  "recall_at_5": 1.0,
+  "precision_at_5": 0.5,
+  "mrr": 1.0,
+  "baselines_compared": [
+    "NaiveLLM",
+    "SimpleVectorRAG",
+    "RepoIntel"
+  ]
+}

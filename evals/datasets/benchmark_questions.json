@@ -1,0 +1,17 @@
+{
+  "description": "Engineering benchmark question set (Phase 44.6). Ground truth is computed per-repository at evaluation time by an independent oracle that scans raw repository files directly (not through RepoIntel's index), so expected evidence is measured, not asserted.",
+  "questions": [
+    {"id": "search_auth", "category": "SEARCH", "question": "Where is authentication implemented?", "oracle_terms": ["auth", "login", "token", "credential", "session"], "difficulty": "easy"},
+    {"id": "arch_overview", "category": "ARCHITECTURE", "question": "Explain the major architecture components.", "oracle_terms": ["service", "controller", "model", "router", "handler", "core"], "difficulty": "medium"},
+    {"id": "execution_flow", "category": "EXECUTION", "question": "How does a request reach the persistence layer?", "oracle_terms": ["request", "route", "handler", "repository", "database", "db", "store", "persist"], "difficulty": "hard"},
+    {"id": "dependency_db", "category": "DEPENDENCY", "question": "Which modules depend on the database layer?", "oracle_terms": ["database", "db", "sqlite", "postgres", "engine", "session", "connect"], "difficulty": "medium"},
+    {"id": "history_auth", "category": "HISTORY", "question": "How has authentication changed over time?", "oracle_terms": ["auth", "login", "token", "credential"], "difficulty": "medium"},
+    {"id": "tests_auth", "category": "TESTS", "question": "Which tests are related to authentication?", "oracle_terms": ["test_auth", "test_login", "auth_test", "test_token"], "difficulty": "easy"},
+    {"id": "impact_user_service", "category": "IMPACT", "question": "What would be affected if UserService changes?", "oracle_terms": ["user_service", "UserService", "user"], "difficulty": "medium"},
+    {"id": "risk_hotspots", "category": "RISK", "question": "Which modules are the highest-risk hotspots?", "oracle_terms": [], "difficulty": "medium"},
+    {"id": "investigate_coupling", "category": "INVESTIGATION", "question": "Why is this module tightly coupled?", "oracle_terms": ["import", "dependency", "coupl"], "difficulty": "hard"},
+    {"id": "decision_extract", "category": "DECISION", "question": "Should this component be extracted into a separate service?", "oracle_terms": [], "difficulty": "hard"},
+    {"id": "simulate_db_swap", "category": "SIMULATION", "question": "What would happen if the current database were replaced?", "oracle_terms": ["database", "db", "engine", "connect", "session"], "difficulty": "hard"},
+    {"id": "report_overview", "category": "REPORT", "question": "Generate an engineering overview.", "oracle_terms": [], "difficulty": "easy"}
+  ]
+}
