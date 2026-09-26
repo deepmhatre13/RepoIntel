@@ -18,8 +18,11 @@ from sqlalchemy import create_engine, engine_from_config, pool
 
 from packages.knowledge import models as knowledge_models
 
-# Import the metadata -- this is the single source of truth for the ORM schema.
-target_metadata = knowledge_models.Base.metadata
+from packages.knowledge.checkpoint_store import checkpoint_metadata
+
+# Separate infrastructure metadata prevents historical ORM-driven revisions
+# from creating new checkpoint tables before their owning revision (0011).
+target_metadata = [knowledge_models.Base.metadata, checkpoint_metadata]
 
 config = context.config
 

@@ -5,19 +5,14 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from packages.knowledge.models import (
     Base,
     SymbolModel,
-    SymbolEdgeModel,
     DependencyModel,
-    TestCaseModel,
     RepositoryModel,
 )
 from packages.knowledge.vector_store import VectorStore
 from packages.knowledge.repository_facade import RepositoryFacade
 from packages.agentic.query_orchestrator import UnifiedQueryOrchestrator, QueryIntentType, QueryComplexity
 from packages.agentic.autonomous_investigator import AutonomousRepositoryInvestigator, SufficiencyStatus
-from packages.knowledge.health_engine import RepositoryHealthEngine, HealthStatus
-from packages.knowledge.root_cause_analysis import RootCauseAnalysisEngine, ProblemType
-from packages.knowledge.change_simulation import EngineeringChangeSimulator
-from packages.agentic.copilot import EngineeringCopilotBackend, EngineeringCopilotRequest, CopilotMode
+from packages.agentic.copilot import CopilotMode
 
 
 @pytest_asyncio.fixture

@@ -1,6 +1,8 @@
 import os
 import pathspec
 
+from packages.ingestion.exceptions import FilteringError
+
 IGNORED_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
     ".idea", ".vscode", ".next", "coverage", ".pytest_cache", ".mypy_cache"
@@ -12,16 +14,27 @@ BINARY_EXTENSIONS = {
     ".sqlite", ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mp3"
 }
 
+from packages.parsing.decoding import decode_file_bytes
+
 def load_gitignore_spec(repo_path: str) -> pathspec.PathSpec:
     gitignore_path = os.path.join(repo_path, ".gitignore")
     patterns = []
     if os.path.exists(gitignore_path):
-        with open(gitignore_path, "r", encoding="utf-8", errors="ignore") as f:
-            patterns = f.readlines()
+        try:
+            with open(gitignore_path, "rb") as f:
+                raw_bytes = f.read()
+            dec_res = decode_file_bytes(raw_bytes, ".gitignore")
+            if dec_res.success:
+                patterns = dec_res.content.splitlines(keepends=True)
+        except Exception:
+            pass
     return pathspec.PathSpec.from_lines("gitwildmatch", patterns)
 
 def filter_repository(repo_path: str) -> list[str]:
-    spec = load_gitignore_spec(repo_path)
+    try:
+        spec = load_gitignore_spec(repo_path)
+    except Exception as exc:
+        raise FilteringError(f"Failed to load .gitignore spec: {exc}")
     allowed_files = []
 
     for root, dirs, files in os.walk(repo_path):

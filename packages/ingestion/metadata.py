@@ -1,7 +1,8 @@
 import os
 import json
 from typing import Dict, List, Tuple
-from packages.shared import RepositoryArchetype, IngestionManifest
+from packages.shared import RepositoryArchetype
+from packages.ingestion.exceptions import MetadataExtractionError
 
 MANIFEST_PATTERNS = {
     "package.json", "requirements.txt", "pyproject.toml", "setup.py",
@@ -72,8 +73,12 @@ def detect_archetype(repo_path: str, filtered_files: List[str], manifest_files: 
     pkg_json = os.path.join(repo_path, "package.json")
     if os.path.exists(pkg_json):
         try:
-            with open(pkg_json, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            from packages.parsing.decoding import decode_file_bytes
+            with open(pkg_json, "rb") as f:
+                raw_bytes = f.read()
+            dec_res = decode_file_bytes(raw_bytes, "package.json")
+            if dec_res.success:
+                data = json.loads(dec_res.content)
                 if "bin" in data:
                     return RepositoryArchetype.CLI_TOOL
         except Exception:

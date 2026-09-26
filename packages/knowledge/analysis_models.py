@@ -61,4 +61,16 @@ class QAAnswer(BaseModel):
     related_files: List[str] = Field(default_factory=list)
     related_symbols: List[str] = Field(default_factory=list)
     related_commits: List[str] = Field(default_factory=list)
+    # --- Phase G: explainable confidence + evidence audit trail ---
+    # confidence_breakdown: dimensional confidence decomposition
+    # (retrieval_confidence, evidence_coverage, source_reliability,
+    #  freshness, conflicts) -- never an opaque scalar.
+    confidence_breakdown: Optional[Dict[str, Any]] = None
+    # audit: deterministic EvidenceAuditor result over the final answer
+    # (claim statuses, citation checks, support ratio). Supports the
+    # "no answer may cite evidence that does not support the claim" contract.
+    audit: Optional[Dict[str, Any]] = None
+    # degraded: True when Gemini was unavailable and the answer is purely
+    # deterministic evidence assembly.
+    degraded: bool = False
 

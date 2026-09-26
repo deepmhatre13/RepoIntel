@@ -10,7 +10,6 @@ Enforces standardized EngineeringCopilotRequest and EngineeringCopilotResponse s
 import uuid
 from enum import Enum
 from typing import List, Dict, Any, Optional
-from datetime import datetime
 from pydantic import BaseModel, Field
 
 from packages.agentic.query_orchestrator import UnifiedQueryOrchestrator

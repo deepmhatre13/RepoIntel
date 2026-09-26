@@ -13,6 +13,7 @@ normalisation performed by ``alembic/env.py`` so migrations operate against the
 same database the application uses at runtime.
 """
 
+import logging
 import os
 import re
 from pathlib import Path
@@ -23,6 +24,17 @@ from alembic.config import Config
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _ALEMBIC_INI = _PROJECT_ROOT / "alembic.ini"
+
+# Alembic emits a lot of INFO-level noise (plugin setup, migration context
+# messages) on every run. Suppress it by default so normal CLI commands don't
+# dump Alembic internals; callers that want verbosity can re-enable it.
+_ALEMBIC_LOGGER_NAMES = ("alembic", "alembic.runtime.migration", "alembic.runtime.plugins", "alembic.script")
+
+# Suppress Alembic INFO noise process-wide by default (children inherit the
+# 'alembic' level unless they define their own). This prevents Alembic plugin
+# setup and context messages from leaking into normal CLI stderr.
+for _name in _ALEMBIC_LOGGER_NAMES:
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 
 def _sync_url(async_url: str) -> str:
@@ -42,9 +54,35 @@ def _alembic_config() -> Config:
     return cfg
 
 
+def _suppress_alembic_logging():
+    """Return a list of (logger, level) to restore after a migration runs."""
+    saved = []
+    for name in _ALEMBIC_LOGGER_NAMES:
+        logger = logging.getLogger(name)
+        saved.append((logger, logger.level))
+        logger.setLevel(logging.WARNING)
+    return saved
+
+
+def _restore_alembic_logging(saved) -> None:
+    for logger, level in saved:
+        logger.setLevel(level)
+
+
 def upgrade_to_head() -> None:
-    """Run all pending migrations up to ``head``."""
-    command.upgrade(_alembic_config(), "head")
+    """Run all pending migrations up to ``head``.
+
+    Idempotent: if the database is already at head, nothing is executed. Alembic's
+    INFO-level logging is suppressed during the operation so that ordinary CLI
+    commands do not dump Alembic internals to stderr.
+    """
+    if current_revision() == head_revision():
+        return
+    saved = _suppress_alembic_logging()
+    try:
+        command.upgrade(_alembic_config(), "head")
+    finally:
+        _restore_alembic_logging(saved)
 
 
 def downgrade_one() -> Optional[str]:
@@ -68,10 +106,15 @@ def current_revision(cfg: Optional[Config] = None) -> Optional[str]:
     from sqlalchemy import create_engine
 
     engine = create_engine(_sync_url(url))
-    with engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        current = context.get_current_revision()
-    engine.dispose()
+    current = None
+    saved = _suppress_alembic_logging()
+    try:
+        with engine.connect() as conn:
+            context = MigrationContext.configure(conn)
+            current = context.get_current_revision()
+    finally:
+        _restore_alembic_logging(saved)
+        engine.dispose()
     if not current:
         return None
     # Look up the script for its (possibly short) revision id.

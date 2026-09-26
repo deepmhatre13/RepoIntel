@@ -2,7 +2,7 @@ import os
 import json
 import re
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List
 
 @dataclass
 class ParsedDependency:

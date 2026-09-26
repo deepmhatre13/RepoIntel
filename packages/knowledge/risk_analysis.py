@@ -4,17 +4,15 @@ Deterministic engineering risk analysis combining static graph, Git history,
 symbol changes, co-change, test relationships, and dependency relationships.
 """
 import json
-import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Set, Tuple
+from typing import List, Dict, Any, Tuple
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from packages.knowledge.models import (
-    SymbolModel, SymbolEdgeModel, SymbolHistoryModel, CoChangeRelationModel,
-    TestToCodeRelationModel, DependencyModel, FileChangeModel, CommitModel,
-    SymbolChangeModel, ChangeRiskAssessmentModel, CodeHotspotModel
+    SymbolEdgeModel, SymbolHistoryModel, CoChangeRelationModel,
+    TestToCodeRelationModel, ChangeRiskAssessmentModel
 )
 
 # Configuration constants
@@ -194,6 +192,55 @@ class HotspotAnalyzer:
 class CouplingAnalyzer:
     """Calculates module-level coupling metrics."""
 
+    def _edge_modules(self, e) -> "tuple[str, str]":
+        """Return (source_module, target_module) resolved for an edge.
+
+        Module-level coupling must only ever be derived from actual module/file
+        dependencies, never from symbol names.
+
+        * ``imports`` edges reference a module. When ``target_file`` is present it
+          wins; otherwise the module is the imported name itself (e.g. ``os``),
+          which is legitimate for a stdlib/third-party import.
+        * ``calls``/``inherits``/``references`` edges are *symbol-level*. A call
+          edge whose ``target_file`` is absent refers to a symbol defined in the
+          same source file (or an unresolved/builtin target) and MUST NOT be
+          promoted to a module dependency.
+
+        This prevents symbols such as ``Calculator``, ``add`` or ``print`` from
+        leaking into the module coupling matrix.
+        """
+        src_module = self._extract_module(e.source_file)
+        if not src_module:
+            return "", ""
+
+        if e.edge_type == "imports":
+            if e.target_file:
+                tgt_module = self._extract_module(e.target_file)
+            else:
+                tgt_module = self._extract_module(e.target_symbol)
+        else:
+            if not e.target_file:
+                return "", ""
+            tgt_module = self._extract_module(e.target_file)
+
+        return src_module, tgt_module
+
+    def _extract_module(self, path: str) -> str:
+        """Extract module/component name from a file path.
+
+        A bare symbol name (no path separators, not a ``.py`` file) cannot
+        resolve to a module; it is treated as empty so symbols never become
+        modules.
+        """
+        if not path:
+            return ""
+        parts = path.replace("\\", "/").split("/")
+        skip_dirs = {"src", "lib", "pkg", "packages", "app", "apps"}
+        for part in parts:
+            if part not in skip_dirs and not part.startswith(".") and not part.endswith(".py"):
+                return part
+        return parts[-1].replace(".py", "") if parts else ""
+
     async def analyze_module_coupling(self, session: AsyncSession, repo_id: str, module: str) -> Dict[str, Any]:
         """Calculate coupling metrics for a module/directory."""
         # fan-out: number of distinct modules this module depends on
@@ -211,8 +258,7 @@ class CouplingAnalyzer:
         module_edges_in = defaultdict(set)
 
         for e in edges:
-            src_module = self._extract_module(e.source_file)
-            tgt_module = self._extract_module(e.target_file) if e.target_file else self._extract_module(e.target_symbol)
+            src_module, tgt_module = self._edge_modules(e)
             if src_module and tgt_module and src_module != tgt_module:
                 module_edges_out[src_module].add(tgt_module)
                 module_edges_in[tgt_module].add(src_module)
@@ -238,17 +284,6 @@ class CouplingAnalyzer:
             "coupling_issues": signals
         }
 
-    def _extract_module(self, path: str) -> str:
-        """Extract module/component name from a file path or symbol name."""
-        if not path:
-            return ""
-        parts = path.replace("\\", "/").split("/")
-        skip_dirs = {"src", "lib", "pkg", "packages", "app", "apps"}
-        for part in parts:
-            if part not in skip_dirs and not part.startswith(".") and not part.endswith(".py"):
-                return part
-        return parts[-1].replace(".py", "") if parts else ""
-
     async def get_module_coupling_matrix(self, session: AsyncSession, repo_id: str) -> Dict[str, Any]:
         """Get coupling matrix across all modules."""
         stmt = select(SymbolEdgeModel).where(SymbolEdgeModel.repo_id == repo_id)
@@ -257,8 +292,7 @@ class CouplingAnalyzer:
 
         modules = defaultdict(lambda: {"fan_in": set(), "fan_out": set()})
         for e in edges:
-            src_mod = self._extract_module(e.source_file)
-            tgt_mod = self._extract_module(e.target_file) if e.target_file else self._extract_module(e.target_symbol)
+            src_mod, tgt_mod = self._edge_modules(e)
             if src_mod and tgt_mod and src_mod != tgt_mod:
                 modules[src_mod]["fan_out"].add(tgt_mod)
                 modules[tgt_mod]["fan_in"].add(src_mod)

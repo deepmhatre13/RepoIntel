@@ -1,0 +1,321 @@
+/* RepoIntel design tokens + named motion scale (M1–M10). */
+
+:root {
+  --paper: #faf7f0;
+  --ink: #2b2828;
+  --ink-12: #2b282833;
+  --ink-soft: #7a7568;
+  --accent: #b8560f;
+  --accent-soft: #f4e3d3;
+  --success: #4e7a5b;
+  --success-soft: #dce8df;
+  --alert: #a33b2b;
+  --alert-soft: #f3d8d3;
+  --code-bg: #22201c;
+  --code-fg: #e8e3d8;
+  --code-kw: #8fb0ff;
+  --code-str: #c9de8a;
+  --code-cmt: #7a7568;
+
+  --font-serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --font-sans: "Source Sans 3", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  /* M1 Ink Rise */
+  --m1-ease: cubic-bezier(0.19, 1, 0.22, 1);
+  --m1-ms: 800ms;
+  /* M2 Pin Snap */
+  --m2-ease: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --m2-ms: 320ms;
+  /* M3 Signal Pulse */
+  --m3-ease: ease-in-out;
+  --m3-ms: 2000ms;
+  /* M4 Trace Draw */
+  --m4-ease: linear;
+  /* M5 Odometer Roll */
+  --m5-ease: cubic-bezier(0.19, 1, 0.22, 1);
+  --m5-ms: 350ms;
+  /* M6 Verdict Morph */
+  --m6-ms: 450ms;
+  /* M7 Grain Drift */
+  --m7-ms: 40s;
+  /* M8 Page Turn */
+  --m8-ease: cubic-bezier(0.19, 1, 0.22, 1);
+  --m8-out: 380ms;
+  --m8-in: 420ms;
+  /* M9 Hatch Freeze */
+  --m9-ms: 500ms;
+  /* M10 Word Bloom */
+  --m10-ease: cubic-bezier(0.19, 1, 0.22, 1);
+  --m10-ms: 220ms;
+  --m10-stagger: 40ms;
+
+  --reduced-ms: 150ms;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+html {
+  background: var(--paper);
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: var(--font-sans);
+  font-size: 17px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+}
+
+/* ---- M3 Signal Pulse ---- */
+.signal-pulse {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  transform-origin: center;
+  animation: signal-pulse var(--m3-ms) var(--m3-ease) infinite;
+}
+
+@keyframes signal-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.4);
+    opacity: 0.4;
+  }
+}
+
+/* ---- M1 Ink Rise ---- */
+.ink-rise {
+  animation: ink-rise var(--m1-ms) var(--m1-ease) both;
+}
+
+@keyframes ink-rise {
+  from {
+    opacity: 0;
+    transform: translateY(28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ink-rise-sm {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ink-rise-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ---- M7 Grain Drift (hero only) ---- */
+.grain-drift {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  opacity: 0.055;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px 180px;
+  animation: grain-drift var(--m7-ms) linear infinite;
+  mix-blend-mode: multiply;
+}
+
+@keyframes grain-drift {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 180px 180px;
+  }
+}
+
+/* ---- M10 Word Bloom ---- */
+.word-bloom {
+  display: inline;
+  animation: word-bloom var(--m10-ms) var(--m10-ease) both;
+}
+
+@keyframes word-bloom {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---- M2 Pin Snap scale on chip ---- */
+@keyframes pin-bounce {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes stat-pulse {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.03);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes odometer-out {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+}
+
+@keyframes odometer-in {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes dash-march {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+
+@keyframes icon-draw {
+  from {
+    stroke-dashoffset: 24;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes verdict-scale {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.02);
+  }
+}
+
+@keyframes tick-fade {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes page-turn-out {
+  to {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+}
+
+@keyframes page-turn-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grain-drift,
+  .signal-pulse {
+    animation: none !important;
+  }
+
+  .ink-rise,
+  .word-bloom,
+  .page-layer-out,
+  .page-layer-in {
+    animation: fade-only var(--reduced-ms) ease both !important;
+    transform: none !important;
+  }
+
+  @keyframes fade-only {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
+@keyframes fade-only {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

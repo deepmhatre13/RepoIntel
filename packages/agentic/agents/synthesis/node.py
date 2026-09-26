@@ -1,6 +1,6 @@
 import json
 from typing import Dict, Any, List
-from packages.agentic.state.schema import RepoIntelState, ArtifactDraft, ArtifactSection, EvidenceCitation
+from packages.agentic.state.schema import RepoIntelState, ArtifactDraft, ArtifactSection
 from packages.agentic.llm_client import LLMClient
 
 SYNTHESIS_SYSTEM_PROMPT = """

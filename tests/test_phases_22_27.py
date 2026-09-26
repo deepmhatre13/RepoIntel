@@ -1,10 +1,10 @@
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from packages.knowledge.models import Base, SymbolHistoryModel, TestCaseModel, TestToCodeRelationModel, SymbolEdgeModel
+from packages.knowledge.models import Base, SymbolHistoryModel, SymbolEdgeModel
 from packages.knowledge.vector_store import VectorStore
 from packages.knowledge.repository_facade import RepositoryFacade
-from packages.parsing.test_parser import discover_tests_in_repo, map_tests_to_production_symbols, DiscoveredTestCase
+from packages.parsing.test_parser import map_tests_to_production_symbols, DiscoveredTestCase
 from packages.parsing.python_ast import SymbolNode
 
 @pytest_asyncio.fixture

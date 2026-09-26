@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
-from sqlalchemy import String, Integer, Float, Text, ForeignKey, DateTime, select
+from typing import Optional, Dict, Any
+from sqlalchemy import String, Text, DateTime, select
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.ext.asyncio import AsyncSession
 from packages.knowledge.models import Base, AgentRunModel, ArtifactModel, ReviewFeedbackModel
@@ -12,7 +12,7 @@ class CheckpointModel(Base):
     thread_id: Mapped[str] = mapped_column(String, primary_key=True)
     run_id: Mapped[str] = mapped_column(String, nullable=False)
     state_json: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class PersistentMemoryStore:
     def __init__(self, session: AsyncSession):

@@ -7,7 +7,7 @@ Preserves provenance and provides explicit explanations for search results.
 """
 
 from enum import Enum
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,10 +16,8 @@ from packages.knowledge.models import (
     SymbolModel,
     SymbolEdgeModel,
     SymbolHistoryModel,
-    TestCaseModel,
-    DependencyModel,
 )
-from packages.knowledge.vector_store import VectorStore, RetrievedEvidenceItem
+from packages.knowledge.vector_store import VectorStore
 from packages.knowledge.reranker import EvidenceReranker
 from packages.knowledge.query_understanding import QueryUnderstandingEngine
 

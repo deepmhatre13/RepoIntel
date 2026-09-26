@@ -13,7 +13,7 @@ reviewer node's in-graph grounding check by providing a reusable audit record
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 _FILE_PATTERN = re.compile(r"[\w\-./\\]+\.(?:py|js|ts|jsx|tsx|json|yaml|yml|md|toml|cfg|ini)")
 

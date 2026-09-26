@@ -12,6 +12,27 @@
     {"id": "investigate_coupling", "category": "INVESTIGATION", "question": "Why is this module tightly coupled?", "oracle_terms": ["import", "dependency", "coupl"], "difficulty": "hard"},
     {"id": "decision_extract", "category": "DECISION", "question": "Should this component be extracted into a separate service?", "oracle_terms": [], "difficulty": "hard"},
     {"id": "simulate_db_swap", "category": "SIMULATION", "question": "What would happen if the current database were replaced?", "oracle_terms": ["database", "db", "engine", "connect", "session"], "difficulty": "hard"},
-    {"id": "report_overview", "category": "REPORT", "question": "Generate an engineering overview.", "oracle_terms": [], "difficulty": "easy"}
+    {"id": "report_overview", "category": "REPORT", "question": "Generate an engineering overview.", "oracle_terms": [], "difficulty": "easy"},
+    {"id": "unanswerable_team_next_month", "category": "UNANSWERABLE", "question": "What feature will the engineering team implement next month?", "oracle_terms": [], "difficulty": "easy", "expected_refusal": true},
+    {"id": "unanswerable_db_password", "category": "UNANSWERABLE", "question": "What is the production database password?", "oracle_terms": [], "difficulty": "easy", "expected_refusal": true},
+    {"id": "health_why_decline", "category": "PROJECT_HEALTH", "question": "Why did project health decline over the last 90 days?", "oracle_terms": ["maintenance", "pr", "commit", "issue", "health"], "difficulty": "medium"},
+    {"id": "health_trajectory", "category": "PROJECT_HEALTH", "question": "Is the current repository health trajectory improving or deteriorating?", "oracle_terms": ["trajectory", "trend", "health", "maintainability"], "difficulty": "medium"},
+    {"id": "file_exact_path", "category": "EXACT_FILE", "question": "Find the module that implements the core entrypoint class.", "oracle_terms": ["main", "app", "server", "index"], "difficulty": "easy"},
+    {"id": "symbol_lookup_def", "category": "SYMBOL_LOOKUP", "question": "Where is the main application class defined?", "oracle_terms": ["class", "App", "Application"], "difficulty": "easy"},
+    {"id": "function_behavior_map", "category": "FUNCTION_BEHAVIOR", "question": "What does the route handler do when a request comes in?", "oracle_terms": ["request", "response", "route", "handler", "return"], "difficulty": "medium"},
+    {"id": "class_behavior_model", "category": "CLASS_BEHAVIOR", "question": "How does the database client class manage connections?", "oracle_terms": ["connection", "database", "session", "connect", "close"], "difficulty": "medium"},
+    {"id": "dependency_manifest", "category": "DEPENDENCY_LOOKUP", "question": "What third-party packages does this project depend on?", "oracle_terms": ["requirements", "package.json", "pyproject", "manifest", "npm"], "difficulty": "easy"},
+    {"id": "import_relations", "category": "IMPORT_RELATION", "question": "Which files import from the configuration module?", "oracle_terms": ["import", "from", "config", "settings"], "difficulty": "medium"},
+    {"id": "call_chain", "category": "CALL_GRAPH", "question": "Trace the call chain from the entry point to the persistence layer.", "oracle_terms": ["call", "invoke", "persist", "save", "store", "handle"], "difficulty": "hard"},
+    {"id": "config_lookup", "category": "CONFIGURATION", "question": "Where is the application configuration defined?", "oracle_terms": ["config", "settings", "environment", "dotenv", "yaml", "json"], "difficulty": "easy"},
+    {"id": "test_runner", "category": "TEST_INTELLIGENCE", "question": "Which test file covers the core computation module?", "oracle_terms": ["test", "spec", "assert", "pytest", "unittest"], "difficulty": "medium"},
+    {"id": "security_entry", "category": "SECURITY", "question": "Where are input validation and security checks performed?", "oracle_terms": ["auth", "validate", "sanitize", "security", "token", "permission"], "difficulty": "medium"},
+    {"id": "cross_file_flow", "category": "CROSS_FILE", "question": "How does data flow from the controller to the storage layer?", "oracle_terms": ["controller", "handler", "service", "storage", "repository", "database"], "difficulty": "hard"},
+    {"id": "cross_module_arch", "category": "CROSS_MODULE", "question": "Which modules form the public-facing API surface?", "oracle_terms": ["api", "router", "endpoint", "route", "public", "export"], "difficulty": "medium"},
+    {"id": "unanswerable_future", "category": "UNANSWERABLE", "question": "What will the maintainers do in the next release?", "oracle_terms": [], "difficulty": "easy", "expected_refusal": true},
+    {"id": "unanswerable_nonexistent_fn", "category": "UNANSWERABLE", "question": "Where is the function computeQuantumEntropy implemented?", "oracle_terms": ["computeQuantumEntropy"], "difficulty": "easy", "expected_refusal": true},
+    {"id": "ambiguous_coupling", "category": "AMBIGUOUS", "question": "Is the module coupled or decoupled?", "oracle_terms": ["coupl", "import", "dependency"], "difficulty": "medium", "needs_clarification": true},
+    {"id": "evidence_citation", "category": "EVIDENCE", "question": "Provide evidence for how authentication errors are handled.", "oracle_terms": ["auth", "error", "exception", "handler", "catch"], "difficulty": "medium"},
+    {"id": "source_health", "category": "SOURCE_AWARE_HEALTH", "question": "What does the source code analysis reveal about the health of this repository?", "oracle_terms": ["source", "code", "health", "parse", "symbol", "deprecat"], "difficulty": "hard"}
   ]
 }

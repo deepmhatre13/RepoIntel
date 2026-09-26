@@ -19,14 +19,11 @@ import os
 import re
 import json
 import time
-import uuid
-import subprocess
 from enum import Enum
 from typing import List, Dict, Any, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
-from packages.evals.evidence_audit import EvidenceAuditor
 
 
 class RepoSizeTier(str, Enum):

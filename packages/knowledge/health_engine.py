@@ -6,17 +6,13 @@ Provides overall health status (HEALTHY, ATTENTION, RISK, CRITICAL) and historic
 """
 
 from enum import Enum
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
+from typing import List, Dict, Any
+from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.knowledge.models import (
-    SymbolModel,
-    SymbolEdgeModel,
-    DependencyModel,
     TestCaseModel,
-    SymbolHistoryModel,
 )
 
 

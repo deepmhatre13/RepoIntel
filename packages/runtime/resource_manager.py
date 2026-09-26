@@ -43,7 +43,7 @@ class ResourceBudgetConfig(BaseModel):
     max_history_commits: int = Field(default_factory=lambda: _env_int("MAX_HISTORY_COMMITS", 50))
     max_context_tokens: int = Field(default_factory=lambda: _env_int("MAX_CONTEXT_TOKENS", 8000))
     max_llm_calls: int = Field(default_factory=lambda: _env_int("MAX_LLM_CALLS", 25))
-    max_execution_seconds: float = Field(default_factory=lambda: _env_int("MAX_EXECUTION_SECONDS", 900))
+    max_execution_seconds: float = Field(default_factory=lambda: _env_int("MAX_EXECUTION_SECONDS", 3600))
     # Stage-specific timeouts (Phase 43.6)
     clone_timeout_seconds: float = Field(default_factory=lambda: _env_int("CLONE_TIMEOUT_SECONDS", 180))
     parse_timeout_seconds: float = Field(default_factory=lambda: _env_int("PARSE_TIMEOUT_SECONDS", 600))

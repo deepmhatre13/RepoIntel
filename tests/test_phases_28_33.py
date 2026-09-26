@@ -6,9 +6,6 @@ from packages.knowledge.models import (
     Base,
     SymbolModel,
     SymbolEdgeModel,
-    DependencyModel,
-    TestCaseModel,
-    TestToCodeRelationModel,
     RepositoryModel,
 )
 from packages.knowledge.vector_store import VectorStore

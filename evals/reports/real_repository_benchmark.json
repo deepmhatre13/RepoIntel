@@ -1,0 +1,85 @@
+{
+  "generated_at": "2026-08-26T10:10:34.390769+00:00",
+  "policy": {
+    "fabrication": "forbidden; unmeasurable metrics are null",
+    "clone_cache": "D:\\Temp\\repointel_bench_cache",
+    "repositories_never_committed": true
+  },
+  "dataset": "D:\\RepoIntel\\evals\\datasets\\real_repositories.json",
+  "configured_repositories": [
+    {
+      "id": "requests_library",
+      "url": "https://github.com/psf/requests.git",
+      "category": "A"
+    },
+    {
+      "id": "httpie_cli",
+      "url": "https://github.com/httpie/cli.git",
+      "category": "B"
+    },
+    {
+      "id": "express_js",
+      "url": "https://github.com/expressjs/express.git",
+      "category": "C"
+    },
+    {
+      "id": "django_multimodule",
+      "url": "https://github.com/django/django.git",
+      "category": "D"
+    },
+    {
+      "id": "flask_history_rich",
+      "url": "https://github.com/pallets/flask.git",
+      "category": "E"
+    }
+  ],
+  "results": [
+    {
+      "id": "express_js",
+      "category": "C",
+      "category_label": "javascript_repository",
+      "url": "https://github.com/expressjs/express.git",
+      "language": "javascript",
+      "license": "MIT",
+      "clone_seconds": null,
+      "clone_reused": true,
+      "status": "READY",
+      "error": null,
+      "head_commit": "023767fe9872e029271df1418f73401bff20ff40",
+      "branch": "master",
+      "archetype": "RepositoryArchetype.SERVICE",
+      "total_analysis_seconds": 252.863,
+      "memory_rss_mb_end": 392.8,
+      "stage_durations": {
+        "INGESTION": 0.328,
+        "PARSING": 11.422,
+        "KNOWLEDGE": 241.047,
+        "EMBEDDING": 0.0,
+        "GRAPH": 0.0,
+        "GIT": 60.953,
+        "ANALYSIS": 0.0
+      },
+      "source_files_on_disk": 141,
+      "loc_on_disk": 21475,
+      "files_persisted": 208,
+      "symbols": 214,
+      "chunks": 834,
+      "dependencies": 44,
+      "graph_nodes": 214,
+      "graph_edges": 405,
+      "commits": 50,
+      "embedding_telemetry": {
+        "embedding_provider": "local",
+        "embedding_model": "all-MiniLM-L6-v2",
+        "embedding_dimension": 384,
+        "cache_stats": {
+          "cache_hits": 10,
+          "cache_misses": 824,
+          "total_embedded": 824,
+          "errors": 0
+        }
+      },
+      "wall_seconds": 260.44
+    }
+  ]
+}

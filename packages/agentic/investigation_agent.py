@@ -6,11 +6,10 @@ detects evidence gaps, and produces structured investigation reports separating 
 """
 
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
-from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from packages.knowledge.repository_facade import RepositoryFacade
+    pass
 
 from packages.agentic.llm_client import LLMClient
 

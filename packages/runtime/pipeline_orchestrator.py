@@ -27,7 +27,6 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from packages.shared import IngestionManifest
 from packages.shared.telemetry import telemetry
@@ -41,21 +40,20 @@ from packages.knowledge.models import (
 )
 from packages.knowledge.db import AsyncSessionLocal
 from packages.knowledge.persistence import (
-    persist_parsing_results, persist_file_fingerprints, count_repo_artifacts,
+    persist_parsing_results, count_repo_artifacts,
 )
 from packages.runtime.lifecycle import (
     RepositoryLifecycleManager, RepositoryLifecycleState, LifecycleStage,
     FailureDetail, PipelineRunRecord,
 )
 from packages.runtime.resource_manager import (
-    ResourceManager, ResourceBudgetConfig, ResourceLimitExceeded,
+    ResourceManager, ResourceBudgetConfig,
 )
 from packages.runtime.recovery import (
     ExecutionResilienceManager, CancellationToken, CancellationRequested,
-    ErrorCategory,
 )
 from packages.runtime.incremental_indexer import (
-    IncrementalIndexer, IncrementalRunReport, ChangeCategory,
+    IncrementalIndexer, IncrementalRunReport,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +97,7 @@ class RepositoryAnalysisPipeline:
 
         # ---- INGEST (filter + metadata + resource admission) ----
         started = self.lifecycle.start_stage(run_id, LifecycleStage.INGESTION)
+        await self._checkpoint(run_id)
         filtered_files = filter_repository(local_path)
         languages, manifest_files, entrypoints, ci_configs = extract_metadata(local_path, filtered_files)
         archetype = detect_archetype(local_path, filtered_files, manifest_files)
@@ -133,7 +132,9 @@ class RepositoryAnalysisPipeline:
             run_id, LifecycleStage.INGESTION, started,
             counts={"files_seen": len(filtered_files), "files_admitted": len(admitted_paths)},
         )
+        await self._checkpoint(run_id)
         self.lifecycle.record_counts(run_id, files_seen=len(filtered_files))
+        await self._checkpoint(run_id)
         telemetry.record_stage_duration("ingestion", time.monotonic() - started)
         return local_path, is_temp_clone, head_commit, branch, manifest, admitted_paths, skipped
 
@@ -153,12 +154,18 @@ class RepositoryAnalysisPipeline:
         run_id = run_id or str(uuid.uuid4())
         repo_id = repo_id or str(uuid.uuid5(uuid.NAMESPACE_URL, repo_url))
         cancel_token = self.resilience.register_run(run_id)
-        run = self.lifecycle.create_run(run_id=run_id, repo_id=repo_id, mode=mode)
         self.resources.start_deadline()
         t0 = time.monotonic()
         local_path: Optional[str] = None
         is_temp_clone = False
         incremental_report: Optional[IncrementalRunReport] = None
+
+        # Persist the CREATED run immediately (Phase 40.3): a run that has been
+        # accepted must be observable in the database even if the worker dies
+        # before ingestion begins.  In-memory lifecycle state is a cache of the
+        # durable ``pipeline_runs`` row, never the other way around.
+        run = self.lifecycle.create_run(run_id=run_id, repo_id=repo_id, mode=mode)
+        await self._persist_run_record(run)
 
         try:
             local_path, is_temp_clone, head_commit, branch, manifest, admitted_paths, skipped = (
@@ -173,6 +180,7 @@ class RepositoryAnalysisPipeline:
 
             # ---------------- PARSING ----------------
             started = self.lifecycle.start_stage(run_id, LifecycleStage.PARSING)
+            await self._checkpoint(run_id)
             parse_res = await asyncio.wait_for(
                 asyncio.to_thread(run_parsing_pipeline, repo_id, local_path, reprocess_files),
                 timeout=self.resources.timeout_for_stage("parse"),
@@ -196,6 +204,7 @@ class RepositoryAnalysisPipeline:
                 },
                 errors=parse_failures,
             )
+            await self._checkpoint(run_id)
             self.lifecycle.record_counts(
                 run_id,
                 files_parsed=parse_res.files_parsed,
@@ -203,13 +212,22 @@ class RepositoryAnalysisPipeline:
                 symbols_extracted=len(parse_res.symbols),
                 chunks_created=len(parse_res.chunks),
             )
+            await self._checkpoint(run_id)
 
             # -------- INDEXING: KNOWLEDGE / EMBEDDING / GRAPH / GIT --------
             started_index = self.lifecycle.start_stage(run_id, LifecycleStage.KNOWLEDGE)
+            await self._checkpoint(run_id)
             incremental_files = (
                 None if incremental_report is None
                 else sorted(set(reprocess_files) | set(deleted_files))
             )
+
+            async def _knowledge_progress(processed: int, total: int) -> None:
+                if total:
+                    run.progress_percentage = round(55.0 + (20.0 * processed / total), 1)
+                self.lifecycle.record_counts(run_id, chunks_created=len(parse_res.chunks))
+                await self._checkpoint(run_id)
+
             async with self.session_factory() as session:
                 await persist_parsing_results(
                     session, manifest, parse_res,
@@ -222,9 +240,16 @@ class RepositoryAnalysisPipeline:
                         if getattr(self, "embedding_service", None) is not None
                         else None
                     ),
+                    embedding_provider=(
+                        getattr(self.embedding_service, "provider_name", None)
+                        if getattr(self, "embedding_service", None) is not None
+                        else None
+                    ),
+                    progress_callback=_knowledge_progress,
                 )
 
                 started_git = self.lifecycle.start_stage(run_id, LifecycleStage.GIT)
+                await self._checkpoint(run_id)
                 commits = []
                 if os.path.isdir(os.path.join(local_path, ".git")):
                     commits = await asyncio.to_thread(
@@ -241,6 +266,7 @@ class RepositoryAnalysisPipeline:
                     run_id, LifecycleStage.GIT, started_git,
                     counts={"commits_ingested": len(commits)},
                 )
+                await self._checkpoint(run_id)
 
                 # TESTS (full refresh per run -> idempotent)
                 from packages.parsing.test_parser import (
@@ -304,17 +330,19 @@ class RepositoryAnalysisPipeline:
                     "edges_persisted": len(parse_res.edges),
                 },
             )
+            await self._checkpoint(run_id)
             telemetry.record_stage_duration("indexing", time.monotonic() - started_index)
             cancel_token.check()
             self.resources.check_deadline("indexing")
 
             # ---------------- ANALYZING ----------------
             started = self.lifecycle.start_stage(run_id, LifecycleStage.ANALYSIS)
+            await self._checkpoint(run_id)
             artifact_generated = False
             artifact_warning = None
             if generate_artifact:
                 artifact_generated, artifact_warning = await self._generate_artifact(
-                    repo_id, repo_url, manifest, artifact_type
+                    repo_id, repo_url, manifest, artifact_type, run_id
                 )
             structure_changed = (
                 incremental_report is None or len(incremental_report.files_modified) > 0
@@ -325,6 +353,7 @@ class RepositoryAnalysisPipeline:
                 counts={"artifact_generated": int(artifact_generated)},
                 warnings=[artifact_warning] if artifact_warning else None,
             )
+            await self._checkpoint(run_id)
 
         except CancellationRequested as exc:
             run.lifecycle_state = RepositoryLifecycleState.FAILED
@@ -446,42 +475,163 @@ class RepositoryAnalysisPipeline:
         return self
 
     async def _generate_artifact(self, repo_id: str, repo_url: str,
-                                 manifest, artifact_type: str):
-        """Optional LangGraph artifact generation (Phase 5-9 pipeline reuse).
+                                 manifest, artifact_type: str, run_id: str):
+        """LangGraph artifact generation (Phase 5-9 pipeline reuse).
 
-        Returns (generated: bool, warning: Optional[str]). LLM unavailability
-        degrades gracefully -- it never fails the repository analysis.
+        Builds the canonical Planner -> Retriever -> Synthesis -> Reviewer ->
+        bounded-reflection graph, grounds it on the *same in-memory vector
+        store that was populated during indexing* (the repository facade is the
+        knowledge boundary; the agent never touches raw files or the DB
+        directly), then durably persists the resulting ``AgentRunModel`` and
+        ``ArtifactModel`` rows so the README endpoint can serve the artifact.
+
+        Returns ``(generated: bool, warning: Optional[str])``. LLM
+        unavailability degrades gracefully -- it never fails the pipeline.
         """
         try:
             from packages.knowledge.vector_store import VectorStore as _VS
             from packages.knowledge.repository_facade import RepositoryFacade
+            from packages.knowledge.models import AgentRunModel, ArtifactModel
             from packages.agentic import LLMClient, RepoIntelState, build_main_graph
 
             llm_client = LLMClient()
             if not llm_client.is_available():
                 return False, "artifact skipped: Gemini unavailable (no GOOGLE_API_KEY); deterministic indexing completed"
-            vs = _VS(llm_client and None or None)
+
+            # Reuse the store that already holds this run's indexed chunks.
+            vs = getattr(self, "_last_vector_store", None)
+            if vs is None:
+                from packages.knowledge.embeddings import create_embedding_service
+                vs = _VS(create_embedding_service())
+
             async with self.session_factory() as session:
                 facade = RepositoryFacade(session, vs)
                 app = build_main_graph(llm_client, facade)
                 initial_state = RepoIntelState(
-                    run_id=str(uuid.uuid4()),
-                    thread_id=str(uuid.uuid4()),
+                    run_id=run_id,
+                    thread_id=run_id,
                     repo_id=repo_id,
                     repo_url=repo_url,
-                    archetype=manifest.archetype.value if hasattr(manifest.archetype, "value") else str(manifest.archetype),
+                    archetype=(
+                        manifest.archetype.value
+                        if hasattr(manifest.archetype, "value")
+                        else str(manifest.archetype)
+                    ),
                     artifact_type=artifact_type,
                 )
-                await asyncio.wait_for(
-                    app.ainvoke(initial_state.model_dump()),
-                    timeout=self.resources.timeout_for_stage("llm") * 4,
+                graph_config = {
+                    "configurable": {
+                        "thread_id": run_id,
+                        "checkpoint_ns": "artifact_generation",
+                        "checkpoint_id": run_id,
+                    }
+                }
+                final_state_dict = await asyncio.wait_for(
+                    app.ainvoke(
+                        initial_state.model_dump(),
+                        config=graph_config,
+                    ),
+                    timeout=max(self.resources.timeout_for_stage("llm") * 4, 60),
                 )
+                final_state = RepoIntelState.model_validate(final_state_dict)
+
+                # Reassemble the grounded README from the graph's artifact draft.
+                artifact_content = ""
+                total_citations = 0
+                draft = getattr(final_state, "artifact_draft", None)
+                if draft is not None:
+                    lines = []
+                    for sec in draft.sections:
+                        lines.append(f"## {sec.section_title}\n\n{sec.content}\n")
+                        total_citations += len(sec.citations or [])
+                    artifact_content = "\n".join(lines)
+
+                verdict = (
+                    final_state.review_report.verdict.value
+                    if final_state.review_report is not None
+                    else "N/A"
+                )
+                run_errors = list(getattr(final_state, "errors", []) or [])
+
+                # Durable agent-run record + artifact (join-compatible with the
+                # /artifacts and /repositories/{id}/artifacts endpoints which
+                # join ArtifactModel.run_id -> AgentRunModel.run_id).
+                await session.merge(AgentRunModel(
+                    run_id=run_id,
+                    repo_id=repo_id,
+                    status=(
+                        "COMPLETED" if verdict != "NEEDS_HUMAN_REVIEW" else "NEEDS_HUMAN_REVIEW"
+                    ),
+                    result_json=json.dumps({
+                        "repo_id": repo_id,
+                        "repo_url": repo_url,
+                        "artifact_type": artifact_type,
+                        "review_verdict": verdict,
+                        "reflection_iterations": getattr(
+                            final_state, "reflection_iteration_count", 0
+                        ),
+                        "citations": total_citations,
+                        "errors": run_errors,
+                    }),
+                ))
+                if artifact_content:
+                    session.add(ArtifactModel(
+                        run_id=run_id,
+                        artifact_type=artifact_type,
+                        content=artifact_content,
+                        version=1,
+                    ))
+                await session.commit()
+
             telemetry.increment("llm_artifacts_generated")
-            return True, None
+            if artifact_content:
+                return True, None
+            return True, (
+                f"artifact generated but empty for run {run_id}; "
+                f"review_verdict={verdict} errors={run_errors}"
+            )
         except Exception as exc:
             category, _retryable = self.resilience.classify_error(exc)
-            self.resilience.record_failure(exc, stage="artifact_generation", attempts=1)
+            self.resilience.record_failure(
+                exc, stage="artifact_generation", attempts=1
+            )
             return False, f"artifact generation degraded ({category.value}): {exc}"
+
+    async def _checkpoint(self, run_id: str) -> None:
+        """Durably flush the in-memory lifecycle record to ``pipeline_runs``.
+
+        DURABILITY INVARIANT (Phase 40.3): every lifecycle state transition is
+        persisted to the database immediately, before the pipeline proceeds to
+        the next stage.  A run that has entered a stage must have its
+        ``status``/``current_stage`` columns reflect that stage in PostgreSQL
+        even if the worker is killed the instant after the transition -- this
+        is what makes the run observable from the API and recoverable after a
+        crash.  Persistence failures are recorded on the run (never raised) so
+        observability cannot break the analysis itself; the subsequent
+        checkpoint for the next transition will retry on fresh evidence.
+        """
+        run = self.lifecycle.runs.get(run_id)
+        if run is None:
+            return
+        await self._persist_run_record(run)
+
+    async def _checkpoint(self, run_id: str) -> None:
+        """Durably flush the in-memory lifecycle record to ``pipeline_runs``.
+
+        DURABILITY INVARIANT (Phase 40.3): every lifecycle state transition is
+        persisted to the database immediately, before the pipeline proceeds to
+        the next stage.  A run that has entered a stage must have its
+        ``status``/``current_stage`` columns reflect that stage in PostgreSQL
+        even if the worker is killed the instant after the transition -- this
+        is what makes the run observable from the API and recoverable after a
+        crash.  Persistence failures are recorded on the run (never raised) so
+        observability cannot break the analysis itself; the next checkpoint
+        retries on fresh evidence.
+        """
+        run = self.lifecycle.runs.get(run_id)
+        if run is None:
+            return
+        await self._persist_run_record(run)
 
     async def _persist_run_record(self, run: PipelineRunRecord):
         """Persist the run record through the existing job/run architecture (Phase 40.2)."""
@@ -525,7 +675,47 @@ class RepositoryAnalysisPipeline:
                         repo_row.last_run_id = run.run_id
                 await session.commit()
         except Exception as exc:  # observability must never break the pipeline
-            logger.warning("Failed to persist run record %s: %s", run.run_id, exc)
+            # A silent warning here would leave the run stuck in its previous
+            # durable state (e.g. CREATED) even though the pipeline finished,
+            # which the UI/API would report as "still in progress". Record the
+            # persistence failure on the run itself and log it loudly, then
+            # retry once through a fresh session so a transient DB hiccup does
+            # not swallow the lifecycle transition.
+            logger.error(
+                "Failed to persist run record %s (state=%s): %s",
+                run.run_id, run.lifecycle_state.value, exc,
+            )
+            run.errors.append(FailureDetail(
+                stage="persistence",
+                error_type=type(exc).__name__,
+                message=f"run record persistence failed: {exc}"[:500],
+                recoverable=True,
+            ))
+            try:
+                async with self.session_factory() as session:
+                    row = (
+                        await session.execute(
+                            select(PipelineRunModel).where(
+                                PipelineRunModel.run_id == run.run_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if row is None:
+                        row = PipelineRunModel(run_id=run.run_id)
+                        session.add(row)
+                    row.repository_id = run.repository_id
+                    row.status = run.lifecycle_state.value
+                    row.current_stage = (
+                        run.current_stage.value if run.current_stage else None
+                    )
+                    row.progress = run.progress_percentage
+                    row.errors_json = json.dumps([e.model_dump() for e in run.errors])
+                    await session.commit()
+            except Exception as retry_exc:
+                logger.error(
+                    "Run record %s could not be persisted on retry either: %s",
+                    run.run_id, retry_exc,
+                )
 
     def _build_outcome(
         self,

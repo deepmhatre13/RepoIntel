@@ -1,0 +1,56 @@
+# RepoIntel .dockerignore — excludes everything not needed in the image.
+
+# VCS
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtualenv / deps
+venv/
+.venv/
+node_modules/
+
+# Local data & secrets (never copied into images)
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+repointel.db
+temp/
+output/
+datasets_flat/
+
+# Build artifacts
+web/dist/
+web/node_modules/
+
+# Reports (regenerated on demand)
+evals/reports/
+
+# Local development / validation scratch files (never needed in the image)
+api_original.py
+check_import*.py
+validate_imports.py
+NUL0
+_run_ws_tests.cmd
+*.log
+*.out
+*_err.txt
+*_out.txt
+*tests*.txt
+*test_results*.txt
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

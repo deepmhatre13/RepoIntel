@@ -88,10 +88,15 @@ Copy `.env.example` to `.env` and fill in values. **Never commit `.env`.**
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `DATABASE_URL` | Async SQLAlchemy URL | `sqlite+aiosqlite:///./repointel.db` |
+| `DATABASE_URL` | Async SQLAlchemy URL (PostgreSQL + pgvector) | `postgresql+asyncpg://…@localhost:5432/…` (see `.env.example`) |
+| `CELERY_BROKER_URL` | Redis broker URL for Celery | `redis://localhost:6379/0` |
+| `CELERY_RESULT_BACKEND` | Redis result backend for Celery | `redis://localhost:6379/1` |
 | `GOOGLE_API_KEY` | Gemini API key | *(none — degraded mode)* |
-| `GEMINI_MODEL` | Gemini model id | `gemini-1.5-pro` |
+| `GEMINI_MODEL` | Gemini model id | `gemini-3.8-flash` |
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
+| `EMBEDDING_PROVIDER` | Embedding provider (`local` = sentence-transformers) | `local` |
+| `EMBEDDING_MODEL` | Pretrained sentence-transformers model id | `all-MiniLM-L6-v2` |
+| `EMBEDDING_BATCH_SIZE` | Embedding batch size (provider level) | `32` |
 | `MAX_REPOSITORY_FILES` | File-count budget | `20000` |
 | `MAX_FILE_SIZE` | Per-file size budget (bytes) | `2097152` |
 | `MAX_TOTAL_REPOSITORY_SIZE` | Total size budget (bytes) | `524288000` |
@@ -103,6 +108,98 @@ Copy `.env.example` to `.env` and fill in values. **Never commit `.env`.**
 | `MAX_CONTEXT_TOKENS` | Context budget for prompts | `8000` |
 | `MAX_LLM_CALLS` | Hard LLM call cap per run | `25` |
 | `MAX_EXECUTION_SECONDS` | Run execution deadline | `900` |
+
+## Local Development (no Docker required)
+
+Running RepoIntel for development does **not** require Docker or Docker Desktop.
+Everything runs as native processes on the host:
+
+```
+FastAPI API        -> python -m uvicorn apps.api:app --reload
+PostgreSQL+pgvector-> a native/local PostgreSQL service with the `vector` extension
+Redis             -> a native/local Redis service (broker + result backend)
+Celery worker     -> python -m packages.worker.start_worker
+Frontend          -> npm run dev  (web/)
+Gemini            -> configured external API (GOOGLE_API_KEY)
+```
+
+1. **Prerequisites** — Python ≥ 3.12 with a working virtual environment, Node.js
+   (for the frontend), and *native* installations of PostgreSQL (with the
+   [pgvector](https://github.com/pgvector/pgvector) extension) and Redis installed
+   as ordinary OS services. No container runtime is used.
+
+2. **Configure** — copy `.env.example` to `.env` and set `DATABASE_URL`,
+   `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` to your local PostgreSQL and
+   Redis endpoints (all three are already configurable via environment variables,
+   so no code changes are needed):
+
+   ```bash
+   cp .env.example .env
+   # DATABASE_URL=postgresql+asyncpg://repointel:repointel_local_dev_password@localhost:5432/repointel
+   # CELERY_BROKER_URL=redis://localhost:6379/0
+   # CELERY_RESULT_BACKEND=redis://localhost:6379/1
+   ```
+
+3. **Start the database, Redis and Celery worker** (each in its own terminal):
+
+   ```bash
+   # PostgreSQL + pgvector: start your local PostgreSQL service, ensure the
+   # `vector` extension is available, then run migrations:
+   python -m repointel.cli db-upgrade
+
+   # Redis: start your local Redis service (must be listening on CELERY_BROKER_URL).
+   # Celery worker:
+   python -m packages.worker.start_worker
+   ```
+
+4. **Start the API:**
+
+   ```bash
+   python -m uvicorn apps.api:app --reload
+   # Interactive docs: http://127.0.0.1:8000/docs
+   ```
+
+5. **Start the frontend:**
+
+   ```bash
+   cd web
+   npm install      # first time only (deps shipped in package-lock.json)
+   npm run dev      # Vite dev server -> http://127.0.0.1:5173 (proxies /api to :8000)
+   ```
+
+6. **Smoke checks** — with the API running:
+
+   ```bash
+   curl http://127.0.0.1:8000/health        # reports database connectivity honestly
+   curl http://127.0.0.1:8000/llm-status    # LIVE_LLM vs DEGRADED_NO_LLM
+   ```
+
+> **Deliberate design note.** The real persistent database is **PostgreSQL +
+> pgvector**. SQLite is *not* used here "because Docker is unavailable"; it remains
+> only a lightweight fallback for offline, unit-only exercises. Redis is a real
+> external service — the worker is never switched to an in-memory queue. The Docker
+> Compose deployment below uses the exact same application architecture and
+> configuration variables.
+
+## Docker Deployment (optional)
+
+The repository ships a complete Docker/Compose deployment that uses the **same**
+application code and configuration variables. When Docker Desktop is available you
+can bring up the whole stack with:
+
+```bash
+docker compose up -d
+#   ├── api        (uvicorn, runs migrations on startup)
+#   ├── db         (PostgreSQL 16 + pgvector)
+#   ├── redis      (broker + result backend)
+#   ├── worker     (Celery, via python -m packages.worker.start_worker)
+#   └── frontend   (nginx serving the built Vite app)
+```
+
+Compose injects its own infrastructure locations (`DATABASE_URL=…@db:5432/…`,
+`CELERY_BROKER_URL=redis://redis:6379/0`) in `docker-compose.yml`; it does not
+depend on your local `.env`. The local workflow and the Docker workflow are
+independent — you can use either without touching the other.
 
 ## Database Setup & Migrations
 
@@ -201,8 +298,11 @@ ratios for grounding quality. Baselines (naive LLM, simple vector RAG) live in
 
 - Without `GOOGLE_API_KEY`, LLM synthesis runs in deterministic degraded mode;
   answers are explicitly marked as such and carry lower confidence.
-- The bundled embedding service returns deterministic placeholder vectors; swap in a
-  real model behind `EmbeddingService.embed_texts` for semantic-quality retrieval.
+- Embeddings use a real pretrained sentence-transformers model (`all-MiniLM-L6-v2`
+  by default, configurable via `EMBEDDING_MODEL`). If the model cannot initialize,
+  the failure is reported explicitly, semantic retrieval is marked unavailable, and
+  deterministic lexical (BM25) retrieval continues — placeholder/hash/random vectors
+  are never substituted.
 - The Starlette testclient emits a third-party deprecation notice about `httpx`
   versus `httpx2`; it is outside this project's control until upstream resolves it.
 - Migration downgrade for schema reconciliation is forward-only by design (data
@@ -224,20 +324,36 @@ ratios for grounding quality. Baselines (naive LLM, simple vector RAG) live in
 
 ## Production Readiness Status
 
-Verified end-to-end (see `tests/test_migrations.py`, `tests/test_e2e_pipeline.py`):
+Verified end-to-end (see `tests/test_migrations.py`, `tests/test_e2e_pipeline.py`,
+`tests/test_security_and_embeddings.py`, `evals/reports/`):
 
-- fresh database migrates to head; existing legacy database upgrades in place with
-  data preserved (`repositories.status` defect eliminated)
+- fresh database migrates to head (`0006`); existing legacy database upgrades in
+  place with data preserved (`repositories.status` defect eliminated)
 - repeated FULL analysis is byte-count identical (idempotent)
 - incremental update processes only changed files
 - forced reindex rebuilds derived knowledge while preserving repository identity
 - lifecycle state persists (`READY`) on both repository and run records
 - CLI commands validate arguments and return meaningful exit codes
+- real sentence-transformers embeddings with content-hash caching, provenance
+  (`model` / `provider` / `dimension` / `created_at`) and deterministic model-change
+  invalidation
+- retrieval benchmark measured across keyword / vector / hybrid / hybrid+rerank /
+  hybrid+graph methods with fact-derived ground truth
+  (`evals/reports/retrieval_benchmark.json`)
+- secret redaction verified against AWS/GitHub/JWT/private-key patterns; only
+  redaction counts are recorded
 
-Not yet verified and therefore not claimed: multi-repository benchmarks against
-large public repositories under a configured Gemini key, and Postgres deployment.
+Measured but environment-dependent (see `production_readiness_report.json` for the
+full matrix with evidence):
 
-`evals/baselines.py`.
+- live Gemini validation requires `GOOGLE_API_KEY`; without it the system runs in
+  explicit degraded mode (`llm_available=false`, no fabricated synthesis)
+- PostgreSQL/pgvector validation requires a running PostgreSQL instance with the
+  `vector` extension; the local Docker daemon was unavailable during validation,
+  so this is reported as BLOCKED rather than claimed
+
+Not yet verified and therefore not claimed: multi-repository benchmarks under a
+configured Gemini key.
 
 ## Benchmark Methodology
 

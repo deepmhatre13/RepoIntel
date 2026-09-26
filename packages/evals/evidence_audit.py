@@ -23,12 +23,12 @@ from enum import Enum
 from typing import List, Dict, Any, Optional
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.knowledge.models import (
     SymbolModel, FileModel, CommitModel, DependencyModel,
-    TestToCodeRelationModel, CodeChunkModel,
+    CodeChunkModel,
 )
 
 _SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
@@ -225,53 +225,7 @@ class EvidenceAuditor:
         return claims
 
 
-class EvidenceAuditor:
-    """Evaluates grounding and accuracy of engineering intelligence outputs.
 
-    Verification is performed against the deterministic knowledge layer (DB),
-    so a claim is only SUPPORTED when the repository actually contains the
-    referenced evidence.
-    """
-
-    def __init__(self, session: Optional[AsyncSession] = None):
-        self.session = session
-        self._files: Optional[set] = None
-        self._symbols: Optional[set] = None
-        self._commits: Optional[set] = None
-        self._symbol_lines: Dict[str, tuple] = {}
-
-    async def _load_index(self, session: AsyncSession, repo_id: str):
-        files_res = await session.execute(
-            select(FileModel.file_path).where(FileModel.repo_id == repo_id)
-        )
-        known_files = {p for (p,) in files_res.all()}
-        chunk_files = await session.execute(
-            select(CodeChunkModel.file_path).where(CodeChunkModel.repo_id == repo_id)
-        )
-        known_files |= {p for (p,) in chunk_files.all()}
-
-        sym_res = await session.execute(
-            select(SymbolModel.symbol_name, SymbolModel.file_path,
-                   SymbolModel.line_start, SymbolModel.line_end)
-            .where(SymbolModel.repo_id == repo_id)
-        )
-        symbols, symbol_lines = set(), {}
-        for name, path, ls, le in sym_res.all():
-            symbols.add(name)
-            symbol_lines.setdefault(name, (path, ls, le))
-
-        commit_res = await session.execute(
-            select(CommitModel.sha).where(CommitModel.repo_id == repo_id)
-        )
-        self._files = known_files
-        self._symbols = symbols
-        self._commits = {sha for (sha,) in commit_res.all()}
-        self._symbol_lines = symbol_lines
-
-    def preload_index(self, files, symbols, commits, symbol_lines=None):
-        """Synchronous injection for tests / non-DB usage."""
-        self._files, self._symbols, self._commits = set(files), set(symbols), set(commits)
-        self._symbol_lines = symbol_lines or {}
 
     def _verify_identifier(self, ident: str) -> Optional[CitationCheck]:
         """Verify one identifier against the repository index (44.4).

@@ -9,7 +9,7 @@ from enum import Enum
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
-from packages.agentic.investigation_agent import EngineeringInvestigationAgent, InvestigationReport
+from packages.agentic.investigation_agent import EngineeringInvestigationAgent
 from packages.agentic.llm_client import LLMClient
 
 

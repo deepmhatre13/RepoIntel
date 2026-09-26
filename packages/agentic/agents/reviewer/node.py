@@ -1,5 +1,4 @@
-import json
-from typing import Dict, Any, List
+from typing import Dict, Any
 from packages.agentic.state.schema import (
     RepoIntelState, ReviewReport, ReviewVerdict, ReviewIssue, IssueType
 )

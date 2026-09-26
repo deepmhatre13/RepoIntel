@@ -7,7 +7,7 @@ Outputs RootCauseReport separating FACTS, INFERENCES, and RECOMMENDATIONS.
 
 from enum import Enum
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.agentic.llm_client import LLMClient

@@ -1,6 +1,5 @@
-from typing import Dict, Any
 from packages.knowledge.repository_facade import RepositoryFacade
-from packages.knowledge.analysis_models import ImpactReport, ChangePlan, ChangePlanStep, ChangeRequirement
+from packages.knowledge.analysis_models import ImpactReport, ChangePlan, ChangeRequirement
 from packages.agentic.llm_client import LLMClient
 
 IMPACT_PLANNER_SYSTEM = """

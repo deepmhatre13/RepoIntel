@@ -5,16 +5,14 @@ approximations, deterministic architectural signals, and potential structural is
 Generates evidence-grounded reports separating FACTS, INFERENCES, and RECOMMENDATIONS.
 """
 
-from typing import List, Dict, Any, Optional, Set
-from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.knowledge.models import (
     SymbolModel,
     SymbolEdgeModel,
-    DependencyModel,
-    RepositoryModel,
 )
 from packages.knowledge.architecture_analysis import ArchitectureAnalyzer, CycleDetector
 from packages.agentic.llm_client import LLMClient

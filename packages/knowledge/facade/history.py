@@ -27,6 +27,73 @@ from packages.knowledge.models import (
 class HistoryCapabilities:
     """Historical / AST diff / change intelligence for RepositoryFacade."""
 
+    async def get_evidence_freshness(
+        self, repo_id: str, file_paths: List[str], now: Any = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """Measure real evidence freshness per file from ingested Git history.
+
+        Returns ``{file_path: {"last_commit_utc": iso_or_None, "age_days": float|None,
+        "freshness": float|None, "status": "MEASURED"|"NO_HISTORY"}}``.
+
+        Freshness is a monotone decay of commit age (measured, not invented):
+        ``exp(-age_days / 180)`` — evidence committed today scores ~1.0, evidence
+        six months old ~0.37, a year old ~0.14. ``None``/MISSING is returned when
+        no ingested history exists for a file — it is never reported as a
+        perfect score, so stale-evidence handling is measurable (Phase G).
+        """
+        from datetime import datetime, timezone
+        import math
+
+        paths = [p for p in (file_paths or []) if p]
+        if not paths:
+            return {}
+        unique = list(dict.fromkeys(paths))
+
+        rows = (await self.session.execute(
+            select(FileChangeModel.file_path, CommitModel.timestamp)
+            .join(
+                CommitModel,
+                (FileChangeModel.commit_sha == CommitModel.sha)
+                & (CommitModel.repo_id == repo_id),
+            )
+            .where(
+                FileChangeModel.repo_id == repo_id,
+                FileChangeModel.file_path.in_(unique),
+            )
+        )).all()
+
+        now_dt = now or datetime.now(timezone.utc)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+
+        latest: Dict[str, datetime] = {}
+        for path, ts in rows:
+            if ts is None:
+                continue
+            ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+            if path not in latest or ts > latest[path]:
+                latest[path] = ts
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for path in unique:
+            ts = latest.get(path)
+            if ts is None:
+                result[path] = {
+                    "last_commit_utc": None,
+                    "age_days": None,
+                    "freshness": None,
+                    "status": "NO_HISTORY",
+                }
+                continue
+            age_days = max(0.0, (now_dt - ts).total_seconds() / 86400.0)
+            result[path] = {
+                "last_commit_utc": ts.isoformat(),
+                "age_days": round(age_days, 2),
+                "freshness": round(math.exp(-age_days / 180.0), 4),
+                "status": "MEASURED",
+            }
+        return result
+
     async def get_symbol_history(
         self, repo_id: str, symbol: str, limit: int = 20
     ) -> List[Dict[str, Any]]:
@@ -311,3 +378,67 @@ class HistoryCapabilities:
         )
         res = await self.session.execute(stmt)
         return [row[0] for row in res.all()]
+
+    async def get_temporal_drift(self, repo_id: str) -> Dict[str, Any]:
+        """Analyze temporal repository drift using Git history and snapshot data.
+
+        Returns INSUFFICIENT_HISTORY when history is too thin (< 2 commits).
+        Otherwise computes symbol churn, API surface drift, dependency drift, and architecture drift.
+        """
+        commits = await self.get_git_commits(repo_id, limit=100)
+        if len(commits) < 2:
+            return {
+                "availability": "INSUFFICIENT_HISTORY",
+                "reason": f"Only {len(commits)} commit(s) in repository history; at least 2 are required for drift analysis.",
+                "commits_count": len(commits),
+                "symbol_churn": None,
+                "api_drift": None,
+                "dependency_drift": None,
+                "architecture_drift": None,
+            }
+
+        symbol_history = await self.get_changed_symbols(repo_id, limit=200)
+        churn_by_commit: Dict[str, int] = {}
+        for sh in symbol_history:
+            sha = sh.get("commit_sha") or "unknown"
+            churn_by_commit[sha] = churn_by_commit.get(sha, 0) + 1
+
+        api_changes = await self.get_api_changes(repo_id, limit=50)
+        dep_changes = await self.get_dependency_changes(repo_id, limit=50)
+
+        from packages.knowledge.models import ArchitectureSnapshotModel
+        stmt = (
+            select(ArchitectureSnapshotModel)
+            .where(ArchitectureSnapshotModel.repo_id == repo_id)
+            .order_by(ArchitectureSnapshotModel.created_at.desc())
+            .limit(2)
+        )
+        res = await self.session.execute(stmt)
+        snapshots = res.scalars().all()
+        arch_drift = None
+        if len(snapshots) >= 2:
+            s_new, s_old = snapshots[0], snapshots[1]
+            arch_drift = {
+                "compared_commits": [s_old.commit_sha, s_new.commit_sha],
+                "layer_change": s_new.layer_count != s_old.layer_count,
+                "component_count_delta": s_new.component_count - s_old.component_count,
+            }
+
+        return {
+            "availability": "AVAILABLE",
+            "commits_analyzed": len(commits),
+            "symbol_churn": {
+                "total_symbol_modifications": len(symbol_history),
+                "commits_with_symbol_changes": len(churn_by_commit),
+                "peak_churn_commit": max(churn_by_commit.items(), key=lambda x: x[1])[0] if churn_by_commit else None,
+            },
+            "api_drift": {
+                "total_api_changes": len(api_changes),
+                "recent_changes": api_changes[:10],
+            },
+            "dependency_drift": {
+                "total_dependency_changes": len(dep_changes),
+                "recent_changes": dep_changes[:10],
+            },
+            "architecture_drift": arch_drift,
+        }

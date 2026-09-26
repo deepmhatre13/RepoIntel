@@ -1,6 +1,6 @@
 import uuid
 from typing import Dict, Any
-from packages.agentic.state.schema import RepoIntelState, Plan, PlanTask
+from packages.agentic.state.schema import RepoIntelState, Plan
 from packages.agentic.llm_client import LLMClient
 
 PLANNER_SYSTEM_PROMPT = """

@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "description": "Reproducible real-repository benchmark configuration. Repositories are cloned on demand from their public URLs into a temporary/cache directory; they are NEVER committed into RepoIntel. Every entry is a public repository with a clear license and public Git history.",
+  "selection_criteria": [
+    "clear permissive license",
+    "public Git history",
+    "multiple modules",
+    "tests present",
+    "configuration files present",
+    "dependency manifests present",
+    "documentation present"
+  ],
+  "clone_policy": {
+    "method": "git clone (shallow allowed via clone_depth when history not under test)",
+    "destination": "<tempdir>/repointel_benchmarks/<repo_id>",
+    "never_committed": true
+  },
+  "repositories": [
+    {
+      "id": "requests_library",
+      "category": "A",
+      "category_label": "python_library",
+      "url": "https://github.com/psf/requests.git",
+      "license": "Apache-2.0",
+      "language": "python",
+      "clone_depth_default": 50,
+      "notes": "Canonical Python library: small module count, rich docstrings, well-known API surface."
+    },
+    {
+      "id": "httpie_cli",
+      "category": "B",
+      "category_label": "python_application_service",
+      "url": "https://github.com/httpie/cli.git",
+      "license": "BSD-3-Clause",
+      "language": "python",
+      "clone_depth_default": 50,
+      "notes": "Real end-user Python CLI application (not a library): plugin architecture, config handling, output processing."
+    },
+    {
+      "id": "express_js",
+      "category": "C",
+      "category_label": "javascript_repository",
+      "url": "https://github.com/expressjs/express.git",
+      "license": "MIT",
+      "language": "javascript",
+      "clone_depth_default": 50,
+      "notes": "Iconic JavaScript repository: exercises the JS parser path, package.json manifest extraction, npm-style layout."
+    },
+    {
+      "id": "django_multimodule",
+      "category": "D",
+      "category_label": "large_multi_module_repository",
+      "url": "https://github.com/django/django.git",
+      "license": "BSD-3-Clause",
+      "language": "python",
+      "clone_depth_default": 1,
+      "expected_scale": {
+        "source_files_min": 2000,
+        "note": "Large multi-module Python codebase; used for scale/performance validation. Shallow clone by default; full history variant available by overriding clone_depth."
+      },
+      "notes": "Large multi-module monorepo-style layout (django/* subpackages), ORM layer, middleware chain: ideal for architecture/flow/impact questions at realistic scale."
+    },
+    {
+      "id": "flask_history_rich",
+      "category": "E",
+      "category_label": "meaningful_git_history",
+      "url": "https://github.com/pallets/flask.git",
+      "license": "BSD-3-Clause",
+      "language": "python",
+      "clone_depth_default": null,
+      "history_requirements": {
+        "full_clone_required": true,
+        "min_commits_expected": 2500,
+        "note": "Long-lived repository with thousands of commits; used to validate Git history ingestion, symbol history, and history-intent queries. clone_depth=null means full clone."
+      },
+      "notes": "History-focused benchmark target."
+    },
+    {
+      "id": "typescript_express",
+      "category": "F",
+      "category_label": "typescript_repository",
+      "url": "https://github.com/expressjs/express.git",
+      "license": "MIT",
+      "language": "typescript",
+      "clone_depth_default": 50,
+      "notes": "Express is predominantly JavaScript but the modern codebase has TypeScript type definitions; exercise TypeScript parsing and type-resolution paths."
+    },
+    {
+      "id": "lodash_js",
+      "category": "G",
+      "category_label": "node_js_utility",
+      "url": "https://github.com/lodash/lodash.git",
+      "license": "MIT",
+      "language": "javascript",
+      "clone_depth_default": 50,
+      "notes": "Small JavaScript utility library with thousands of exported functions: ideal for symbol lookup, call-graph, and large-symbol-count coverage."
+    },
+    {
+      "id": "moby_go",
+      "category": "H",
+      "category_label": "go_repository",
+      "url": "https://github.com/moby/moby.git",
+      "license": "Apache-2.0",
+      "language": "go",
+      "clone_depth_default": 1,
+      "expected_scale": {
+        "source_files_min": 500,
+        "note": "Large Go project; used for Go parsing and large-graph validation. Shallow clone."
+      },
+      "notes": "Docker/Moby: large multi-module Go codebase with deep call graph; validates Go parser support at scale."
+    },
+    {
+      "id": "fastapi_py",
+      "category": "I",
+      "category_label": "modern_python_framework",
+      "url": "https://github.com/fastapi/fastapi.git",
+      "license": "MIT",
+      "language": "python",
+      "clone_depth_default": 50,
+      "notes": "Modern Python framework with decorators, dependency injection, extensive type hints; good for graph and call-chain questions."
+    }
+  ],
+  "question_categories": [
+    "code_search",
+    "architecture",
+    "execution_flow",
+    "dependency",
+    "configuration",
+    "history",
+    "test",
+    "impact",
+    "risk",
+    "investigation",
+    "root_cause",
+    "decision",
+    "simulation",
+    "report",
+    "typescript_types",
+    "go_packages",
+    "symbol_lookup",
+    "cross_file",
+    "cross_module",
+    "unanswerable",
+    "ambiguous",
+    "evidence",
+    "citation"
+  ],
+  "ground_truth_policy": "Ground truth is never hand-invented for retrieval scoring: it is derived programmatically from indexed repository facts (symbol -> defining file/chunk mappings taken from the ingestion-produced symbol table)."
+}

@@ -4,14 +4,19 @@ from packages.agentic.agents.synthesis.node import synthesis_node
 from packages.agentic.agents.reviewer.node import reviewer_node
 
 def route_reflection(state: RepoIntelState) -> str:
+    # Pure routing: reads the verdict the reviewer produced. The revision
+    # budget is owned by reviewer_node, which increments
+    # ``reflection_iteration_count`` as a persisted state update and forces
+    # verdict=NEEDS_HUMAN_REVIEW once the budget is exhausted — so a
+    # REVISE_SYNTHESIS verdict here always still has budget remaining, and
+    # the loop is bounded by construction.
     if not state.review_report:
         return "EXIT"
-    
+
     verdict = state.review_report.verdict
     if verdict == ReviewVerdict.REVISE_SYNTHESIS:
         return "Synthesis"
-    else:
-        return "EXIT"
+    return "EXIT"
 
 def build_reflection_subgraph(llm_client, facade):
     subgraph = StateGraph(RepoIntelState)

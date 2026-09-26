@@ -10,7 +10,7 @@ Labels outputs strictly as CURRENT FACT, SIMULATED CONSEQUENCE, and ASSUMPTION.
 
 from enum import Enum
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.agentic.llm_client import LLMClient

@@ -5,8 +5,6 @@ classifies changes, and detects API/dependency changes.
 """
 import subprocess
 import re
-import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from packages.parsing.python_ast import parse_python_file, SymbolNode

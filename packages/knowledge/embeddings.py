@@ -42,6 +42,11 @@ class EmbeddingProvider:
     """Interface that every embedding provider must implement."""
 
     @property
+    def provider_name(self) -> str:
+        """Stable short name for the provider (e.g. 'local')."""
+        raise NotImplementedError
+
+    @property
     def model_name(self) -> str:
         raise NotImplementedError
 
@@ -86,6 +91,10 @@ class LocalSentenceTransformerProvider:
         return self._model_name
 
     @property
+    def provider_name(self) -> str:
+        return "local"
+
+    @property
     def dimension(self) -> int:
         self._ensure_loaded()
         return self._dimension or 384
@@ -102,10 +111,12 @@ class LocalSentenceTransformerProvider:
                         "sentence-transformers is required for local embeddings."
                     ) from exc
                 self._model = SentenceTransformer(self._model_name, device=self._device)
-                try:
-                    dim = self._model.get_embedding_dimension()
-                except AttributeError:  # pragma: no cover - older sentence-transformers
-                    dim = self._model.get_sentence_embedding_dimension()
+                dim = None
+                getter = getattr(self._model, "get_sentence_embedding_dimension", None)
+                if callable(getter):
+                    dim = getter()
+                if not dim:  # pragma: no cover - defensive fallback
+                    dim = getattr(self._model, "embedding_dimension", None)
                 self._dimension = int(dim) if dim else 384
                 self._model.max_seq_length = self._max_seq_length
                 logger.info(
@@ -196,6 +207,10 @@ class EmbeddingService:
         return self._provider
 
     @property
+    def provider_name(self) -> str:
+        return getattr(self._provider, "provider_name", "unknown")
+
+    @property
     def model_name(self) -> str:
         return self._provider.model_name
 
@@ -247,6 +262,13 @@ class EmbeddingService:
                 self._stats["total_embedded"] += 1
 
         telemetry.increment("embedding_cache_hits", self._stats["cache_hits"])
+        missing = [i for i, r in enumerate(results) if r is None]
+        if missing:
+            self._stats["errors"] += len(missing)
+            raise RuntimeError(
+                "Embedding provider failed to embed %d/%d texts "
+                "(first failing index: %d)" % (len(missing), len(texts), missing[0])
+            )
         return [r for r in results if r is not None]  # type: ignore[misc]
 
     def embed_query(self, query: str) -> List[float]:
@@ -254,7 +276,7 @@ class EmbeddingService:
 
     def get_telemetry(self) -> Dict[str, object]:
         return {
-            "embedding_provider": "LocalSentenceTransformerProvider",
+            "embedding_provider": self.provider_name,
             "embedding_model": self.model_name,
             "embedding_dimension": self.dimension,
             "cache_stats": dict(self._stats),

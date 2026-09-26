@@ -108,13 +108,18 @@ class RepositoryFacade(
             for d in deps
         ]
     async def get_file_metadata(self, repo_id: str, file_path: str) -> Optional[Dict[str, Any]]:
+        # Suffix match so a query naming "calculator.py" resolves to the
+        # indexed "src/calculator.py" (mirrors get_symbols_for_file).
         stmt = select(SymbolModel).where(
-            SymbolModel.repo_id == repo_id, SymbolModel.file_path == file_path
+            SymbolModel.repo_id == repo_id, SymbolModel.file_path.endswith(file_path)
         )
         res = await self.session.execute(stmt)
         symbols = res.scalars().all()
+        if not symbols:
+            return None
+        actual_path = symbols[0].file_path
         return {
-            "file_path": file_path,
+            "file_path": actual_path,
             "symbol_count": len(symbols),
             "symbols": [s.symbol_name for s in symbols],
         }
@@ -153,8 +158,10 @@ class RepositoryFacade(
             for e in edges
         ]
     async def get_symbols_for_file(self, repo_id: str, file_path: str) -> List[Dict[str, Any]]:
+        # Suffix match so a user query naming "calculator.py" resolves to
+        # "src/calculator.py" (or any other directory prefix) in the index.
         stmt = select(SymbolModel).where(
-            SymbolModel.repo_id == repo_id, SymbolModel.file_path == file_path
+            SymbolModel.repo_id == repo_id, SymbolModel.file_path.endswith(file_path)
         )
         res = await self.session.execute(stmt)
         symbols = res.scalars().all()
@@ -162,6 +169,28 @@ class RepositoryFacade(
             {
                 "symbol_name": s.symbol_name,
                 "symbol_type": s.symbol_type,
+                "line_start": s.line_start,
+                "line_end": s.line_end,
+                "signature": s.signature,
+                "docstring": s.docstring,
+                "file_path": s.file_path,
+            }
+            for s in symbols
+        ]
+
+    async def get_symbols_by_name(self, repo_id: str, symbol_name: str) -> List[Dict[str, Any]]:
+        """Look up repository symbols whose name matches (exact or dotted suffix)."""
+        stmt = select(SymbolModel).where(
+            SymbolModel.repo_id == repo_id,
+            SymbolModel.symbol_name == symbol_name,
+        )
+        res = await self.session.execute(stmt)
+        symbols = res.scalars().all()
+        return [
+            {
+                "symbol_name": s.symbol_name,
+                "symbol_type": s.symbol_type,
+                "file_path": s.file_path,
                 "line_start": s.line_start,
                 "line_end": s.line_end,
                 "signature": s.signature,

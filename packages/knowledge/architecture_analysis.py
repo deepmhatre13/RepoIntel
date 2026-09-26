@@ -3,16 +3,12 @@
 Detects components from file structure, builds component-level graphs,
 creates architecture snapshots, and compares them over time.
 """
-import json
-import os
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Set, Tuple
+from typing import List, Dict, Any, Set
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from packages.knowledge.models import (
-    ArchitectureSnapshotModel, SymbolModel, SymbolEdgeModel, FileChangeModel,
-    CommitModel, RepositoryModel, ArchitectureEdgeModel
+    SymbolModel, SymbolEdgeModel, CommitModel
 )
 
 # Component type definitions based on naming conventions

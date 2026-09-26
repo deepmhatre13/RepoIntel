@@ -1,5 +1,8 @@
+from typing import Dict, Any
+
 from langgraph.graph import StateGraph, END
-from packages.agentic.state.schema import RepoIntelState, ReviewVerdict
+from langgraph.types import interrupt
+from packages.agentic.state.schema import RepoIntelState, ReviewVerdict, HumanFeedback
 from packages.agentic.agents.planner.node import planner_node
 from packages.agentic.agents.retriever.node import retriever_node
 from packages.agentic.graphs.reflection_subgraph import build_reflection_subgraph
@@ -17,7 +20,17 @@ def route_main(state: RepoIntelState) -> str:
         return "HumanReview"
     return "Finalize"
 
-def build_main_graph(llm_client, facade):
+def build_main_graph(llm_client, facade, checkpointer=None):
+    """Build the main LangGraph with optional checkpointing.
+    
+    Args:
+        llm_client: LLM client for agent operations
+        facade: Repository facade for knowledge access
+        checkpointer: Optional LangGraph checkpoint saver for state persistence.
+                     When None, the saver is resolved through
+                     ``packages.knowledge.checkpoint_store.resolve_checkpointer``
+                     so durable checkpointing is never silently downgraded.
+    """
     graph = StateGraph(RepoIntelState)
 
     def _planner_step(state: RepoIntelState):
@@ -32,12 +45,59 @@ def build_main_graph(llm_client, facade):
         return {"route_decision": "FINALIZED"}
 
     def _human_review_step(state: RepoIntelState):
+        """Human review node using LangGraph's native interrupt()/Command(resume=...) HITL.
+
+        First invocation: interrupt() persists a checkpoint, suspends the graph,
+        and surfaces the review payload to the caller. Execution never proceeds
+        past this point until the graph is resumed with Command(resume=<payload>).
+
+        Resumed invocation: LangGraph re-executes this node from the checkpoint,
+        and interrupt() returns the resume payload (the human's decision). The
+        decision is written into state.human_feedback as a durable state update
+        and the routing decision is derived from it — the human's input is the
+        single source of truth, not a database boolean.
+        """
+        # If human feedback is already present in state (e.g. replayed
+        # checkpoint after the decision was applied), route on it directly.
         if state.human_feedback:
-            if state.human_feedback.decision == "APPROVE":
-                return {"route_decision": "FINALIZED"}
-            elif state.human_feedback.decision == "REQUEST_REVISION":
-                return {"route_decision": "REVISE_SYNTHESIS"}
-        return {"route_decision": "NEEDS_HUMAN_REVIEW"}
+            return _route_on_human_feedback(state.human_feedback)
+
+        # First pass: suspend and request human input.
+        resume_payload = interrupt({
+            "type": "human_review_required",
+            "run_id": state.run_id,
+            "thread_id": state.thread_id,
+            "review_report": state.review_report.model_dump() if state.review_report else None,
+            "message": "Human review required before continuing analysis.",
+        })
+
+        # Resumed: interrupt() returned the human's decision payload.
+        if isinstance(resume_payload, HumanFeedback):
+            feedback = resume_payload
+        elif isinstance(resume_payload, dict):
+            feedback = HumanFeedback(
+                approved=bool(resume_payload.get("approved", False)),
+                decision=resume_payload.get("decision", "REJECT"),
+                comments=resume_payload.get("comments"),
+            )
+        else:
+            # Resume without a usable decision — remain suspended for review.
+            return {"route_decision": "NEEDS_HUMAN_REVIEW"}
+        return _route_on_human_feedback(feedback)
+
+    def _route_on_human_feedback(feedback: HumanFeedback) -> Dict[str, Any]:
+        # The decision is applied and then cleared from state: keeping it set
+        # would make every later HumanReview pass take the "already decided"
+        # branch and route back into reflection, so a reviewer that keeps
+        # returning NEEDS_HUMAN_REVIEW would loop forever without ever
+        # suspending again. Clearing it makes the next HumanReview pass call
+        # interrupt() and suspend for a fresh human decision.
+        if feedback.decision == "APPROVE":
+            return {"human_feedback": None, "route_decision": "FINALIZED"}
+        if feedback.decision == "REQUEST_REVISION":
+            return {"human_feedback": None, "route_decision": "REVISE_SYNTHESIS"}
+        # Unknown/REJECT decision — require another human pass.
+        return {"human_feedback": None, "route_decision": "NEEDS_HUMAN_REVIEW"}
 
     graph.add_node("Planner", _planner_step)
     graph.add_node("Retriever", _retriever_step)
@@ -71,4 +131,16 @@ def build_main_graph(llm_client, facade):
 
     graph.add_edge("Finalize", END)
 
-    return graph.compile()
+    # Durable checkpointing is a correctness requirement, not a best-effort
+    # enhancement: a run that silently checkpointed into process memory cannot be
+    # recovered after a worker restart, and an operator would have no signal that
+    # recovery was lost. The saver is therefore constructed through an explicit
+    # provider (``REPOINTEL_ALLOW_INMEMORY_CHECKPOINTS=1`` permits the in-memory
+    # saver for tests/CLI only) and never as a blanket ``except Exception``
+    # fallback that hides an unusable database.
+    if checkpointer is None:
+        from packages.knowledge.checkpoint_store import resolve_checkpointer
+
+        checkpointer = resolve_checkpointer()
+
+    return graph.compile(checkpointer=checkpointer)

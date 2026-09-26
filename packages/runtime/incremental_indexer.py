@@ -15,7 +15,7 @@ import re
 import hashlib
 import subprocess
 from enum import Enum
-from typing import List, Dict, Any, Optional, Set, Tuple
+from typing import List, Dict, Optional, Set, Tuple
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -26,7 +26,12 @@ from packages.shared.telemetry import telemetry
 
 
 def _git(repo_path: str, *args: str) -> str:
-    res = subprocess.run(["git", *args], cwd=repo_path, capture_output=True, text=True)
+    # git emits UTF-8; the platform default (cp1252 on Windows) crashes on
+    # non-ASCII author names / paths (Phase T real-corpus finding).
+    res = subprocess.run(
+        ["git", *args], cwd=repo_path, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
     if res.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {res.stderr.strip()[:200]}")
     return res.stdout.strip()

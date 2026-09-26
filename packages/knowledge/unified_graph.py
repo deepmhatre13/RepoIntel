@@ -16,11 +16,8 @@ from packages.knowledge.models import (
     SymbolModel,
     SymbolEdgeModel,
     DependencyModel,
-    CommitModel,
     TestCaseModel,
     TestToCodeRelationModel,
-    ArtifactModel,
-    CrossRepoRelationModel,
 )
 
 
@@ -54,6 +51,18 @@ class EdgeType(str, Enum):
     PART_OF = "PART_OF"
     IMPLEMENTS = "IMPLEMENTS"
     DOCUMENTS = "DOCUMENTS"
+
+    # ---- Phase: Rich repository knowledge graph (provenance-aware) ----
+    REFERENCES = "REFERENCES"
+    INHERITS = "INHERITS"
+    EXPOSES = "EXPOSES"
+    SECURITY_FINDING_FOR = "SECURITY_FINDING_FOR"
+    INTRODUCED_BY = "INTRODUCED_BY"
+    MODIFIED_BY = "MODIFIED_BY"
+    DELETED_BY = "DELETED_BY"
+    AFFECTS = "AFFECTS"
+    RELATED_TO = "RELATED_TO"
+    CHANGED_BY = "CHANGED_BY"
 
 
 @dataclass
@@ -289,6 +298,51 @@ class RepositoryKnowledgeGraph:
 
         return [[self._nodes[nid].to_dict() for nid in p] for p in paths]
 
+    def to_networkx(self):
+        """Export the knowledge graph to a NetworkX DiGraph for advanced graph algorithms."""
+        import networkx as nx
+
+        g = nx.DiGraph()
+        for nid, node in self._nodes.items():
+            g.add_node(nid, **node.properties, name=node.name, node_type=str(node.node_type))
+        for src, edges in self._adj_out.items():
+            for e in edges:
+                g.add_edge(e.source_id, e.target_id, edge_type=str(e.edge_type), confidence=e.confidence)
+        return g
+
+    def compute_pagerank(self, alpha: float = 0.85) -> Dict[str, float]:
+        """Compute PageRank centrality across all nodes in the knowledge graph."""
+        g = self.to_networkx()
+        if len(g) == 0:
+            return {}
+        import networkx as nx
+        try:
+            return nx.pagerank(g, alpha=alpha)
+        except Exception:
+            return {n: 1.0 / len(g) for n in g.nodes()}
+
+    def compute_articulation_points(self) -> List[str]:
+        """Find articulation points (critical bottleneck nodes whose removal disconnects the graph)."""
+        g = self.to_networkx().to_undirected()
+        if len(g) == 0:
+            return []
+        import networkx as nx
+        try:
+            return list(nx.articulation_points(g))
+        except Exception:
+            return []
+
+    def compute_strongly_connected_components(self) -> List[List[str]]:
+        """Find strongly connected components (dependency cycles/tight clusters)."""
+        g = self.to_networkx()
+        if len(g) == 0:
+            return []
+        import networkx as nx
+        try:
+            return [list(c) for c in nx.strongly_connected_components(g) if len(c) > 1]
+        except Exception:
+            return []
+
     def get_node_evidence(self, node_id: str) -> Dict[str, Any]:
         node = self._nodes.get(node_id)
         if not node:
@@ -370,15 +424,32 @@ class RepositoryKnowledgeGraph:
                 )
             )
 
-        # 3. Symbol Edges (Calls, Imports, Dependencies)
+        # 3. Symbol Edges (Calls, Imports, Dependencies, Inheritance, References)
         edge_stmt = select(SymbolEdgeModel).where(SymbolEdgeModel.repo_id == repo_id)
         edge_res = await session.execute(edge_stmt)
         edges = edge_res.scalars().all()
+        _EDGE_TYPE_MAP = {
+            "calls": EdgeType.CALLS,
+            "imports": EdgeType.IMPORTS,
+            "inherits": EdgeType.INHERITS,
+            "references": EdgeType.REFERENCES,
+            "implements": EdgeType.IMPLEMENTS,
+            "depends_on": EdgeType.DEPENDS_ON,
+            "depends": EdgeType.DEPENDS_ON,
+            "uses": EdgeType.REFERENCES,
+            "tests": EdgeType.TESTS,
+            "defines": EdgeType.DEFINES,
+            "contains": EdgeType.CONTAINS,
+            "exposes": EdgeType.EXPOSES,
+            "related_to": EdgeType.RELATED_TO,
+            "affects": EdgeType.AFFECTS,
+            "changed_by": EdgeType.CHANGED_BY,
+        }
         for e in edges:
             src_id = f"symbol:{e.source_file}:{e.source_symbol}" if e.source_symbol and e.source_file else f"file:{e.source_file}"
             tgt_id = f"symbol:{e.target_file}:{e.target_symbol}" if e.target_symbol and e.target_file else f"file:{e.target_file}"
             if src_id in self._nodes and tgt_id in self._nodes:
-                edge_type = EdgeType.CALLS if e.edge_type == "calls" else EdgeType.DEPENDS_ON
+                edge_type = _EDGE_TYPE_MAP.get(e.edge_type, EdgeType.CALLS)
                 self.add_edge(
                     GraphEdge(
                         source_id=src_id,

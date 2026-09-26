@@ -6,11 +6,10 @@ and delivers structured decision reports separating FACTS, INFERENCES, and RECOM
 """
 
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
-from dataclasses import dataclass, field
-from sqlalchemy.ext.asyncio import AsyncSession
+from dataclasses import dataclass
 
 if TYPE_CHECKING:
-    from packages.knowledge.repository_facade import RepositoryFacade
+    pass
 
 from packages.agentic.llm_client import LLMClient
 

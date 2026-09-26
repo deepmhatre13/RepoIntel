@@ -1,7 +1,8 @@
 import os
 import re
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Any
+from packages.parsing.decoding import decode_file_bytes
 
 @dataclass
 class DiscoveredTestCase:
@@ -33,8 +34,12 @@ def discover_tests_in_repo(repo_path: str, filtered_files: List[str]) -> List[Di
             continue
 
         try:
-            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
+            with open(full_path, "rb") as f:
+                raw_bytes = f.read()
+            dec_res = decode_file_bytes(raw_bytes, rel_path)
+            if not dec_res.success:
+                continue
+            content = dec_res.content
         except Exception:
             continue
 

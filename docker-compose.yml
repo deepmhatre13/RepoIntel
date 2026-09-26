@@ -1,0 +1,137 @@
+# RepoIntel production compose file.
+#
+# Deploys the PostgreSQL database, Redis broker, the Celery worker, the
+# RepoIntel API/frontend container, and an nginx reverse proxy.
+#
+# Standard usage:
+#     docker compose up -d
+#
+# Environment (set in your shell or a .env alongside this file):
+#     GOOGLE_API_KEY        optional; when absent the API runs in deterministic
+#                           degraded mode (Gemini unavailable is explicit, not fate).
+#     POSTGRES_PASSWORD     set a strong value in production.
+
+services:
+  db:
+    # PostgreSQL 16 with the pgvector extension pre-installed (maintained image).
+    # The stock postgres:16-alpine image does NOT ship the `vector` extension,
+    # which RepoIntel's knowledge layer requires (pgvector.sqlalchemy.Vector).
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-repointel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-repointel_local_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-repointel}
+    volumes:
+      - repointel_pgdata:/var/lib/postgresql/data
+      # Enable the vector extension on first database initialization (idempotent).
+      - ./docker/db/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-repointel} -d ${POSTGRES_DB:-repointel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    volumes:
+      - repointel_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-repointel}:${POSTGRES_PASSWORD:-repointel_local_dev_password}@db:5432/${POSTGRES_DB:-repointel}
+      REPOINTEL_JWT_SECRET: ${REPOINTEL_JWT_SECRET:-repointel_production_jwt_secret_change_me_in_prod}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      REPOINTEL_CORS_ORIGINS: ${REPOINTEL_CORS_ORIGINS:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REPOINTEL_WORKERS: ${REPOINTEL_WORKERS:-1}
+      MAX_REPOSITORY_FILES: ${MAX_REPOSITORY_FILES:-20000}
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-2097152}
+      MAX_LLM_CALLS: ${MAX_LLM_CALLS:-25}
+      MAX_EXECUTION_SECONDS: ${MAX_EXECUTION_SECONDS:-900}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    # Direct developer access to the API (http://localhost:8000) is intentionally
+    # published: the README and test-suite interact with /health, /llm-status and
+    # /openapi.json directly on this port. The frontend also reaches the API here.
+    ports:
+      - "${REPOINTEL_API_PORT:-8000}:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Migrations are owned by the API container (docker-entrypoint.sh runs
+      # `alembic upgrade head` before serving). Start the worker only once the
+      # API is healthy so it never races schema setup.
+      api:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-repointel}:${POSTGRES_PASSWORD:-repointel_local_dev_password}@db:5432/${POSTGRES_DB:-repointel}
+      REPOINTEL_JWT_SECRET: ${REPOINTEL_JWT_SECRET:-repointel_production_jwt_secret_change_me_in_prod}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAX_REPOSITORY_FILES: ${MAX_REPOSITORY_FILES:-20000}
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-2097152}
+      MAX_LLM_CALLS: ${MAX_LLM_CALLS:-25}
+      MAX_EXECUTION_SECONDS: ${MAX_EXECUTION_SECONDS:-900}
+    command: python -m packages.worker.start_worker
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'from celery.app.control import Control; from packages.worker.celery_app import celery_app; res = Control(celery_app).ping(); exit(0 if res else 1)'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${REPOINTEL_HTTP_PORT:-8080}:80"
+
+volumes:
+  repointel_pgdata:
+  repointel_redis:
+
+networks:
+  default:
+    driver: bridge

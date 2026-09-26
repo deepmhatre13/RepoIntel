@@ -1,5 +1,9 @@
 import json
-from typing import List, Dict, Any, Iterable, Optional
+import logging
+import math
+import os
+from datetime import datetime, timezone
+from typing import Awaitable, Callable, List, Dict, Any, Iterable, Optional
 from sqlalchemy import delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from packages.knowledge.models import (
@@ -8,7 +12,21 @@ from packages.knowledge.models import (
     TestCaseModel, TestToCodeRelationModel, CommitModel
 )
 from packages.shared import IngestionManifest
+from packages.shared.telemetry import telemetry
 from packages.parsing.pipeline import ParsingPipelineResult
+
+logger = logging.getLogger(__name__)
+
+
+def _validate_embedding(vector: Optional[list], expected_dimension: Optional[int]) -> None:
+    if vector is None:
+        return
+    if expected_dimension is not None and len(vector) != expected_dimension:
+        raise ValueError(
+            f"Embedding dimension mismatch: expected {expected_dimension}, got {len(vector)}"
+        )
+    if not all(math.isfinite(float(value)) for value in vector):
+        raise ValueError("Embedding contains a non-finite value")
 
 
 async def _ensure_repository_row(
@@ -143,16 +161,39 @@ async def upsert_file_result(
     chunks: list,
     embedding_service=None,
     embedding_model: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+    embedding_dimension: Optional[int] = None,
 ) -> int:
     """Persist one parsed file's artifacts, replacing previous rows for the file.
 
     Idempotent by construction: re-persisting identical content yields identical rows.
     When ``embedding_service`` is provided, each chunk's content is embedded and
-    the vector (plus model + dimension metadata) is stored alongside the chunk for
-    pgvector / persistent semantic retrieval.
-
+    the vector (plus model + provider + dimension + created_at provenance) is
     Returns number of chunks persisted.
     """
+    for chunk in chunks:
+        if "\x00" in chunk.content:
+            raise ValueError(
+                f"Database safety invariant violation: NUL byte ('\\x00') in chunk content for file '{chunk.file_path}'"
+            )
+
+    existing_embeddings: Dict[tuple, list] = {}
+    if embedding_service is not None and embedding_model:
+        existing_rows = await session.execute(
+            select(CodeChunkModel).where(
+                CodeChunkModel.repo_id == repo_id,
+                CodeChunkModel.file_path == file_path,
+                CodeChunkModel.content_hash.in_([c.content_hash for c in chunks]),
+                CodeChunkModel.embedding_model == embedding_model,
+                CodeChunkModel.embedding_provider == embedding_provider,
+                CodeChunkModel.embedding.isnot(None),
+            )
+        )
+        existing_embeddings = {
+            (row.content_hash, row.line_start, row.line_end): list(row.embedding)
+            for row in existing_rows.scalars()
+        }
+
     await invalidate_file_rows(session, repo_id, [file_path])
 
     session.add(FileModel(
@@ -171,25 +212,49 @@ async def upsert_file_result(
             edge_type=edge.edge_type, target_symbol=edge.target_symbol, target_file=edge.target_file,
         ))
 
-    # Pre-compute embeddings for the file's chunks (batched) so we can detect
-    # model-mismatch and reuse without per-chunk embedding calls.
-    if embedding_service is not None:
+    # Pre-compute embeddings for the file's chunks (batched).
+    # Stage 3: when the provider is unavailable, mark semantic retrieval as
+    # unavailable rather than falling back to fake vectors.
+    missing_chunks = [
+        c for c in chunks
+        if (c.content_hash, c.line_start, c.line_end) not in existing_embeddings
+    ]
+    if embedding_service is not None and embedding_model and missing_chunks:
         try:
-            emb_list = embedding_service.embed_texts([c.content for c in chunks])
-        except Exception:
-            emb_list = [None] * len(chunks)
+            generated = embedding_service.embed_texts([c.content for c in missing_chunks])
+            generated_by_key = {
+                (chunk.content_hash, chunk.line_start, chunk.line_end): vector
+                for chunk, vector in zip(missing_chunks, generated)
+            }
+        except Exception as exc:
+            # Degraded mode: persist chunks without vectors rather than failing
+            # the whole ingestion run, but never swallow the reason silently.
+            logger.warning(
+                "Embedding unavailable for %s (model=%s): %s: %s",
+                file_path, embedding_model, type(exc).__name__, exc,
+            )
+            generated_by_key = {}
     else:
-        emb_list = [None] * len(chunks)
+        generated_by_key = {}
 
+    _now = datetime.now(timezone.utc)
     for i, chunk in enumerate(chunks):
-        emb = emb_list[i]
+        if "\x00" in chunk.content:
+            raise ValueError(
+                f"Database safety invariant violation: NUL byte ('\\x00') in chunk content for file '{chunk.file_path}'"
+            )
+        key = (chunk.content_hash, chunk.line_start, chunk.line_end)
+        emb = existing_embeddings.get(key) or generated_by_key.get(key)
+        _validate_embedding(emb, embedding_dimension)
         session.add(CodeChunkModel(
             repo_id=repo_id, file_path=chunk.file_path, symbol_name=chunk.symbol_name,
             line_start=chunk.line_start, line_end=chunk.line_end, content=chunk.content,
             content_hash=chunk.content_hash, language=chunk.language,
             embedding=emb,
             embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
             embedding_dimension=len(emb) if emb else None,
+            embedding_created_at=_now,
         ))
     await session.flush()
     return len(chunks)
@@ -223,6 +288,48 @@ async def count_repo_artifacts(session: AsyncSession, repo_id: str) -> Dict[str,
     }
 
 
+async def _resolve_current_embedding_dimension(
+    session,
+    repo_id: str,
+    embedding_service,
+    current_model: Optional[str],
+    current_provider: Optional[str],
+) -> Optional[int]:
+    """Return the current embedding dimension without forcing a model load.
+
+    ``EmbeddingService.dimension`` lazily loads the embedding model, which is an
+    expensive (multi-second) operation. Stored chunk rows produced by the *same*
+    model+provider carry the dimension that model actually produced, so when the
+    stored rows agree we can reuse that value for the mismatch check instead of
+    loading the model. The model is only loaded when no same-model rows exist
+    (fresh index - embeddings will be computed anyway) or when stored rows
+    disagree (genuine inconsistency that must be resolved against the real
+    dimension so incompatible vectors are invalidated).
+    """
+    from sqlalchemy import select
+
+    if embedding_service is None:
+        return None
+    dims = (
+        (
+            await session.execute(
+                select(CodeChunkModel.embedding_dimension)
+                .where(CodeChunkModel.repo_id == repo_id)
+                .where(CodeChunkModel.embedding.isnot(None))
+                .where(CodeChunkModel.embedding_model == current_model)
+                .where(CodeChunkModel.embedding_provider == current_provider)
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    dims = {d for d in dims if d is not None}
+    if len(dims) == 1:
+        return dims.pop()
+    return embedding_service.dimension
+
+
 async def persist_parsing_results(
     session: AsyncSession,
     manifest: IngestionManifest,
@@ -232,6 +339,9 @@ async def persist_parsing_results(
     branch: Optional[str] = None,
     embedding_service=None,
     embedding_model: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+    persist_batch_size: Optional[int] = None,
+    progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
 ):
     """Idempotently persist parsing results.
 
@@ -245,14 +355,29 @@ async def persist_parsing_results(
     repo_id = parsing_res.repo_id
     await _ensure_repository_row(session, repo_id, manifest, head_commit=head_commit, branch=branch)
 
-    files_filter = set(incremental_files) if incremental_files is not None else None
+    # Stage 3: if the embedding model / provider changed since the last index,
+    # invalidate stale embeddings so no incompatible vectors are ever compared.
+    if embedding_service is not None and embedding_model:
+        provider_name = (
+            getattr(embedding_service, "provider_name", None)
+            or embedding_provider
+        )
+        current_dimension = await _resolve_current_embedding_dimension(
+            session, repo_id, embedding_service, embedding_model, provider_name
+        )
+        await invalidate_embeddings_for_model_mismatch(
+            session, repo_id,
+            current_model=embedding_model,
+            current_provider=provider_name,
+            current_dimension=current_dimension,
+        )
 
-    if files_filter is None:
-        # Full replace of derived artifacts -> no duplicates across re-runs.
-        await session.execute(delete(SymbolModel).where(SymbolModel.repo_id == repo_id))
-        await session.execute(delete(SymbolEdgeModel).where(SymbolEdgeModel.repo_id == repo_id))
-        await session.execute(delete(CodeChunkModel).where(CodeChunkModel.repo_id == repo_id))
-        await session.execute(delete(FileModel).where(FileModel.repo_id == repo_id))
+    files_filter = set(incremental_files) if incremental_files is not None else None
+    resolved_embedding_dimension = None
+    if embedding_service is not None and embedding_model:
+        resolved_embedding_dimension = await _resolve_current_embedding_dimension(
+            session, repo_id, embedding_service, embedding_model, embedding_provider
+        )
 
     symbols_by_file: Dict[str, list] = {}
     edges_by_file: Dict[str, list] = {}
@@ -272,6 +397,26 @@ async def persist_parsing_results(
 
     file_hashes = getattr(parsing_res, "parsed_file_hashes", {})
     all_paths = set(symbols_by_file) | set(edges_by_file) | set(chunks_by_file) | set(file_hashes)
+    if files_filter is not None:
+        stale_paths = set(files_filter) - set(all_paths)
+        if stale_paths:
+            await invalidate_file_rows(session, repo_id, sorted(stale_paths))
+    else:
+        stored_paths = set(
+            (
+                await session.execute(
+                    select(FileModel.file_path).where(FileModel.repo_id == repo_id)
+                )
+            ).scalars().all()
+        )
+        stale_paths = stored_paths - all_paths
+        if stale_paths:
+            await invalidate_file_rows(session, repo_id, sorted(stale_paths))
+
+    batch_size = persist_batch_size or int(os.getenv("KNOWLEDGE_PERSIST_BATCH_SIZE", "25"))
+    if batch_size < 1:
+        raise ValueError("persist_batch_size must be at least 1")
+    processed = 0
     for rel_path in sorted(all_paths):
         if files_filter is not None and rel_path not in files_filter:
             continue
@@ -288,12 +433,66 @@ async def persist_parsing_results(
             chunks=file_chunks,
             embedding_service=embedding_service,
             embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
+            embedding_dimension=resolved_embedding_dimension,
         )
+        processed += 1
+        if processed % batch_size == 0:
+            await session.commit()
+            if progress_callback is not None:
+                await progress_callback(processed, len(all_paths))
 
     if files_filter is None:
         await replace_dependencies(session, repo_id, parsing_res.dependencies)
 
     await session.commit()
+    if progress_callback is not None and processed % batch_size:
+        await progress_callback(processed, len(all_paths))
+
+
+# ---------------------------------------------------------------------------
+# Embedding versioning / model-mismatch invalidation (Stage 3)
+# ---------------------------------------------------------------------------
+
+async def invalidate_embeddings_for_model_mismatch(
+    session: AsyncSession,
+    repo_id: str,
+    current_model: str,
+    current_provider: Optional[str] = None,
+    current_dimension: Optional[int] = None,
+) -> Dict[str, int]:
+    """Invalidate stored embeddings whose model/provider/dimension no longer match.
+
+    Determines the set of chunks whose persisted embedding provenance differs from
+    the current active model+provider+dimension. Those rows are left in place with
+    ``embedding=None`` (their vectors are NOT safely comparable), so semantic
+    retrieval will simply skip them and the next persist pass re-embeds them.
+
+    Returns a count of invalidated rows so the operation is observable.
+    """
+    rows = await session.execute(
+        select(CodeChunkModel).where(CodeChunkModel.repo_id == repo_id)
+    )
+    invalidated = 0
+    for row in rows.scalars().all():
+        mismatch = False
+        if row.embedding is not None:
+            if current_model and row.embedding_model != current_model:
+                mismatch = True
+            elif current_provider and row.embedding_provider != current_provider:
+                mismatch = True
+            elif current_dimension and row.embedding_dimension != current_dimension:
+                mismatch = True
+        if mismatch:
+            row.embedding = None
+            row.embedding_model = None
+            row.embedding_provider = None
+            row.embedding_dimension = None
+            row.embedding_created_at = None
+            invalidated += 1
+    if invalidated:
+        telemetry.increment("embedding_invalidated_model_mismatch", invalidated)
+    return {"invalidated": invalidated}
 
 
 # ---------------------------------------------------------------------------

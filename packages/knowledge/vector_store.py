@@ -202,7 +202,9 @@ class VectorStore:
         bm = self._bm25_for(repo_id) if BM25Okapi is not None else None
         if bm is not None:
             try:
-                bm_scores = bm.get_scores([query])
+                # Corpus was tokenized via content.split(); the query must be
+                # tokenized the same way or BM25 returns ~0 for every chunk.
+                bm_scores = bm.get_scores(tokens)
                 for i in range(len(chunks)):
                     scored.append((float(bm_scores[i]), i))
             except Exception:

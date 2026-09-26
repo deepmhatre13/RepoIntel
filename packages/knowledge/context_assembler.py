@@ -1,4 +1,4 @@
-from typing import List, Dict, Set
+from typing import List, Set
 from packages.knowledge.vector_store import RetrievedEvidenceItem
 
 class ContextAssembler:

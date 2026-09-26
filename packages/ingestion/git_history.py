@@ -1,10 +1,9 @@
 import os
 import json
-import hashlib
 import subprocess
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
-from sqlalchemy import select
+from typing import List, Dict, Any
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from packages.knowledge.models import (
     CommitModel, FileChangeModel, SymbolHistoryModel, SymbolChangeModel,
@@ -18,7 +17,14 @@ def parse_git_commits(repo_path: str, max_depth: int = 50) -> List[Dict[str, Any
         return []
     try:
         cmd = ["git", "log", f"-n{max_depth}", "--pretty=format:%H|%P|%an|%at|%s"]
-        res = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, check=True)
+        # encoding="utf-8" + errors="replace": git output is UTF-8; on Windows the
+        # default locale codec (cp1252) crashes on non-ASCII author names /
+        # commit subjects, which previously caused silent total history loss
+        # (the outer except returned []). Phase T: measured on the real corpus.
+        res = subprocess.run(
+            cmd, cwd=repo_path, capture_output=True, text=True, check=True,
+            encoding="utf-8", errors="replace",
+        )
         lines = res.stdout.strip().split("\n")
         commits = []
         for line in lines:
@@ -31,7 +37,10 @@ def parse_git_commits(repo_path: str, max_depth: int = 50) -> List[Dict[str, Any
             dt = datetime.fromtimestamp(int(ts_str), tz=timezone.utc) if ts_str.isdigit() else datetime.now(timezone.utc)
 
             diff_cmd = ["git", "show", "--numstat", "--pretty=format:", sha]
-            diff_res = subprocess.run(diff_cmd, cwd=repo_path, capture_output=True, text=True)
+            diff_res = subprocess.run(
+                diff_cmd, cwd=repo_path, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
             changes = []
             for dline in diff_res.stdout.strip().split("\n"):
                 if not dline.strip():
@@ -67,7 +76,8 @@ async def persist_git_commits(
     parsed_symbols=None,
     repo_path: str = None,
     max_history_commits: int = 50,
-    max_diff_size: int = 100000
+    max_diff_size: int = 100000,
+    max_co_change_pairs: int = 2000,
 ):
     """Persist git commits with AST-aware diff analysis (Phase 23).
 
@@ -264,40 +274,77 @@ async def persist_git_commits(
             )
             session.add(dc_obj)
 
-        # Aggregate Co-Change relationships (update existing, not duplicate)
-        unique_syms = list(set(changed_symbols_in_commit))
+        # Aggregate Co-Change relationships (set-based, idempotent).
+        #
+        # The original implementation issued one async SELECT per symbol pair
+        # per commit. A shallow-clone root commit marks every parsed symbol as
+        # changed (~2k symbols), so the O(k^2) pair loop executed ~2M database
+        # round-trips inside a single uncommitted transaction -- the stage
+        # appeared frozen for hours while holding the write lock.
+        #
+        # Now: pairs are aggregated in memory (dict keyed by the canonical
+        # ordered pair), existing rows for this repo are fetched exactly once,
+        # counters are incremented in memory, and the diff is written as bulk
+        # adds. Uniqueness of (repo_id, symbol_a, symbol_b) is enforced by the
+        # schema (migration 0014) so a concurrent/retried run cannot duplicate
+        # a pair; ON CONFLICT is not needed because the in-memory map already
+        # merged counts and the read happened inside the same transaction.
+        unique_syms = list(dict.fromkeys(changed_symbols_in_commit))  # dedupe, order-stable
+        pair_counts: Dict[tuple, Dict[str, Any]] = {}
         for i in range(len(unique_syms)):
             for j in range(i + 1, len(unique_syms)):
+                if len(pair_counts) >= max_co_change_pairs:
+                    break
                 sa, sb = sorted([unique_syms[i], unique_syms[j]])
-
-                # Check if relationship already exists
-                coc_stmt = select(CoChangeRelationModel).where(
-                    CoChangeRelationModel.repo_id == repo_id,
-                    CoChangeRelationModel.symbol_a == sa,
-                    CoChangeRelationModel.symbol_b == sb
-                )
-                existing = (await session.execute(coc_stmt)).scalar_one_or_none()
-
-                if existing:
-                    existing.co_change_count = (existing.co_change_count or 0) + 1
-                    existing.supporting_commits = json.dumps(
-                        json.loads(existing.supporting_commits or "[]") + [c["sha"]]
-                    ) if existing.supporting_commits else json.dumps([c["sha"]])
-                    # Update ratio if we know total commits
-                    if c.get("total_commits"):
-                        existing.co_change_ratio = round(
-                            existing.co_change_count / c.get("total_commits"), 4
-                        )
-                    session.add(existing)
+                key = (sa, sb)
+                entry = pair_counts.get(key)
+                if entry is None:
+                    pair_counts[key] = {
+                        "symbol_a": sa,
+                        "symbol_b": sb,
+                        "co_change_count": 1,
+                        "supporting_commits": [c["sha"]],
+                    }
                 else:
-                    co_obj = CoChangeRelationModel(
-                        repo_id=repo_id,
-                        symbol_a=sa,
-                        symbol_b=sb,
-                        co_change_count=1,
-                        supporting_commits=json.dumps([c["sha"]])
+                    entry["co_change_count"] += 1
+                    entry["supporting_commits"].append(c["sha"])
+            if len(pair_counts) >= max_co_change_pairs:
+                break
+
+        if pair_counts:
+            keys = list(pair_counts.keys())
+            existing_pairs = {}
+            if keys:
+                existing_res = await session.execute(
+                    select(CoChangeRelationModel).where(
+                        CoChangeRelationModel.repo_id == repo_id,
+                        tuple_(CoChangeRelationModel.symbol_a, CoChangeRelationModel.symbol_b)
+                        .in_([list(k) for k in keys]),
                     )
-                    session.add(co_obj)
+                )
+                for row in existing_res.scalars():
+                    existing_pairs[(row.symbol_a, row.symbol_b)] = row
+
+            for key, agg in pair_counts.items():
+                row = existing_pairs.get(key)
+                if row is not None:
+                    row.co_change_count = (row.co_change_count or 0) + agg["co_change_count"]
+                    commits_json = json.loads(row.supporting_commits or "[]")
+                    commits_json.extend(agg["supporting_commits"])
+                    row.supporting_commits = json.dumps(commits_json[-200:])
+                    if c.get("total_commits"):
+                        row.co_change_ratio = round(
+                            row.co_change_count / c["total_commits"], 4
+                        )
+                    session.add(row)
+                else:
+                    session.add(CoChangeRelationModel(
+                        repo_id=repo_id,
+                        symbol_a=agg["symbol_a"],
+                        symbol_b=agg["symbol_b"],
+                        co_change_count=agg["co_change_count"],
+                        supporting_commits=json.dumps(agg["supporting_commits"][-200:]),
+                    ))
 
         # Store CommitAnalysis
         ca_obj = CommitAnalysisModel(
