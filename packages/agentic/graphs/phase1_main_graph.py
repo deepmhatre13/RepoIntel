@@ -1,11 +1,16 @@
 from typing import Dict, Any
 
 from langgraph.graph import StateGraph, END
+from langgraph.runtime import Runtime
+from langgraph.types import RetryPolicy
 from langgraph.types import interrupt
 from packages.agentic.state.schema import RepoIntelState, ReviewVerdict, HumanFeedback
+from packages.agentic.llm_client import LLMFailureError, llm_node_context
+from packages.shared.llm_mode import LLMMode
 from packages.agentic.agents.planner.node import planner_node
 from packages.agentic.agents.retriever.node import retriever_node
 from packages.agentic.graphs.reflection_subgraph import build_reflection_subgraph
+from packages.knowledge.persistent_memory import PersistentMemoryStore
 
 def route_main(state: RepoIntelState) -> str:
     if not state.review_report:
@@ -20,7 +25,7 @@ def route_main(state: RepoIntelState) -> str:
         return "HumanReview"
     return "Finalize"
 
-def build_main_graph(llm_client, facade, checkpointer=None):
+def build_main_graph(llm_client, facade, checkpointer=None, store=None):
     """Build the main LangGraph with optional checkpointing.
     
     Args:
@@ -33,18 +38,38 @@ def build_main_graph(llm_client, facade, checkpointer=None):
     """
     graph = StateGraph(RepoIntelState)
 
-    def _planner_step(state: RepoIntelState):
-        return planner_node(state, llm_client)
+    async def _planner_step(state: RepoIntelState, runtime: Runtime):
+        repository_memory = {}
+        if runtime.store is not None:
+            memory = PersistentMemoryStore(runtime.store)
+            await memory.save_archetype(state.repo_id, state.archetype)
+            repository_memory = await memory.load_repository_context(state.repo_id)
+
+        with llm_node_context("Planner"):
+            planner_result = planner_node(state, llm_client, repository_memory)
+        if hasattr(llm_client, "get_mode"):
+            active_mode = llm_client.get_mode()
+        elif hasattr(llm_client, "last_mode"):
+            active_mode = llm_client.last_mode
+        else:
+            active_mode = "LIVE_GEMINI" if getattr(llm_client, "is_available", lambda: False)() else "DEGRADED_FALLBACK"
+        llm_mode: LLMMode = active_mode
+        return {
+            **planner_result,
+            "llm_mode": llm_mode,
+            "degraded": llm_mode != "LIVE_GEMINI",
+        }
 
     async def _retriever_step(state: RepoIntelState):
-        return await retriever_node(state, facade, llm_client)
+        with llm_node_context("Retriever"):
+            return await retriever_node(state, facade, llm_client)
 
     reflection_subgraph = build_reflection_subgraph(llm_client, facade)
 
     def _finalize_step(state: RepoIntelState):
         return {"route_decision": "FINALIZED"}
 
-    def _human_review_step(state: RepoIntelState):
+    async def _human_review_step(state: RepoIntelState, runtime: Runtime):
         """Human review node using LangGraph's native interrupt()/Command(resume=...) HITL.
 
         First invocation: interrupt() persists a checkpoint, suspends the graph,
@@ -60,6 +85,10 @@ def build_main_graph(llm_client, facade, checkpointer=None):
         # If human feedback is already present in state (e.g. replayed
         # checkpoint after the decision was applied), route on it directly.
         if state.human_feedback:
+            if runtime.store is not None:
+                await PersistentMemoryStore(runtime.store).save_human_correction(
+                    state.repo_id, state.run_id, state.human_feedback
+                )
             return _route_on_human_feedback(state.human_feedback)
 
         # First pass: suspend and request human input.
@@ -83,6 +112,10 @@ def build_main_graph(llm_client, facade, checkpointer=None):
         else:
             # Resume without a usable decision — remain suspended for review.
             return {"route_decision": "NEEDS_HUMAN_REVIEW"}
+        if runtime.store is not None:
+            await PersistentMemoryStore(runtime.store).save_human_correction(
+                state.repo_id, state.run_id, feedback
+            )
         return _route_on_human_feedback(feedback)
 
     def _route_on_human_feedback(feedback: HumanFeedback) -> Dict[str, Any]:
@@ -100,7 +133,11 @@ def build_main_graph(llm_client, facade, checkpointer=None):
         return {"human_feedback": None, "route_decision": "NEEDS_HUMAN_REVIEW"}
 
     graph.add_node("Planner", _planner_step)
-    graph.add_node("Retriever", _retriever_step)
+    graph.add_node(
+        "Retriever",
+        _retriever_step,
+        retry_policy=RetryPolicy(max_attempts=2, retry_on=(LLMFailureError,)),
+    )
     graph.add_node("ReflectionSubgraph", reflection_subgraph)
     graph.add_node("Finalize", _finalize_step)
     graph.add_node("HumanReview", _human_review_step)
@@ -143,4 +180,4 @@ def build_main_graph(llm_client, facade, checkpointer=None):
 
         checkpointer = resolve_checkpointer()
 
-    return graph.compile(checkpointer=checkpointer)
+    return graph.compile(checkpointer=checkpointer, store=store)

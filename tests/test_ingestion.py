@@ -2,6 +2,7 @@ import os
 import pytest
 from packages.ingestion import run_ingestion_pipeline, cleanup_repository
 from packages.ingestion.cloning import clone_repository, validate_repo_url
+from packages.ingestion.security import validate_local_repo_path
 from packages.ingestion.exceptions import (
     CloneFailedError,
     RepoTooLargeError,
@@ -44,7 +45,9 @@ def test_ingestion_synthetic():
     target = "./evals/datasets/python_library"
     create_synthetic_py_lib(target)
     
-    manifest, files = run_ingestion_pipeline(target)
+    manifest, files = run_ingestion_pipeline(
+        target, allowed_local_root=os.path.dirname(os.path.realpath(target))
+    )
     assert manifest.file_count >= 2
     assert "Python" in manifest.languages
     assert manifest.archetype.value in ("LIBRARY", "UNKNOWN")
@@ -101,8 +104,43 @@ class TestSSRFGuard:
     def test_local_dir_returns_local_result(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            parsed = validate_repo_url(tmpdir)
+            parsed = validate_local_repo_path(tmpdir, os.path.dirname(tmpdir))
             assert parsed.scheme == "local"
+
+    def test_filter_skips_symlinks_to_paths_outside_repository(self, tmp_path):
+        from packages.ingestion.filtering import filter_repository
+
+        repository = tmp_path / "repository"
+        repository.mkdir()
+        external_file = tmp_path / "outside.py"
+        external_file.write_text("SECRET = 'outside the checkout'\n", encoding="utf-8")
+        link = repository / "outside.py"
+        try:
+            link.symlink_to(external_file)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"Symlink creation is unavailable: {exc}")
+
+        assert "outside.py" not in filter_repository(str(repository))
+
+    def test_filter_rejects_files_resolving_outside_repository(self, monkeypatch, tmp_path):
+        from packages.ingestion import filtering
+
+        repository = tmp_path / "repository"
+        repository.mkdir()
+        escaped = repository / "escaped.py"
+        escaped.write_text("value = 1\n", encoding="utf-8")
+        outside = tmp_path / "outside.py"
+        outside.write_text("secret = True\n", encoding="utf-8")
+        original_realpath = filtering.os.path.realpath
+
+        def resolve_with_escape(path):
+            if os.fspath(path) == os.fspath(escaped):
+                return os.fspath(outside)
+            return original_realpath(path)
+
+        monkeypatch.setattr(filtering.os.path, "realpath", resolve_with_escape)
+
+        assert "escaped.py" not in filtering.filter_repository(str(repository))
 
 
 class TestTypedExceptions:

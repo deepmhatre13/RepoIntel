@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
+from packages.shared.llm_mode import LLMMode
 
 
 class AgentToolCall(BaseModel):
@@ -51,6 +52,7 @@ class AgenticQAState(BaseModel):
     reasoning_summary: str = ""
     final_answer: Optional[str] = None
     degraded: bool = False
+    llm_mode: LLMMode = "LIVE_GEMINI"
     errors: List[str] = Field(default_factory=list)
 
 

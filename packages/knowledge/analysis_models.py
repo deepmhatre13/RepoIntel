@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
+from packages.shared.llm_mode import LLMMode
 
 class EntrypointTrace(BaseModel):
     entrypoint: str
@@ -73,4 +74,5 @@ class QAAnswer(BaseModel):
     # degraded: True when Gemini was unavailable and the answer is purely
     # deterministic evidence assembly.
     degraded: bool = False
+    llm_mode: LLMMode = "LIVE_GEMINI"
 

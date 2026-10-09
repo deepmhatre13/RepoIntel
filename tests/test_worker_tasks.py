@@ -35,17 +35,12 @@ def test_index_repository_task_exists():
     assert callable(tasks.index_repository)
 
 
-def test_run_agent_graph_task_exists():
-    assert hasattr(tasks, "run_agent_graph")
-    assert callable(tasks.run_agent_graph)
-
-
 def test_all_tasks_registered():
     registered = [t.name for t in celery_app.tasks.values()]
     assert "packages.worker.tasks.ingest_repository" in registered
     assert "packages.worker.tasks.parse_repository" in registered
     assert "packages.worker.tasks.index_repository" in registered
-    assert "packages.worker.tasks.run_agent_graph" in registered
+    assert "packages.worker.tasks.run_repository_analysis" in registered
 
 
 def test_tasks_have_retry_config():
@@ -53,7 +48,7 @@ def test_tasks_have_retry_config():
         "packages.worker.tasks.ingest_repository",
         "packages.worker.tasks.parse_repository",
         "packages.worker.tasks.index_repository",
-        "packages.worker.tasks.run_agent_graph",
+        "packages.worker.tasks.run_repository_analysis",
     ]:
         task = celery_app.tasks[name]
         assert task.max_retries >= 1
@@ -77,11 +72,6 @@ def test_async_parse_is_importable():
 def test_async_index_is_importable():
     assert hasattr(tasks, "_async_index")
     assert callable(tasks._async_index)
-
-
-def test_async_run_agent_is_importable():
-    assert hasattr(tasks, "_async_run_agent")
-    assert callable(tasks._async_run_agent)
 
 
 def test_persist_run_state_is_importable():

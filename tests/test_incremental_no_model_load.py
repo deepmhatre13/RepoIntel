@@ -132,6 +132,32 @@ async def test_unchanged_incremental_update_does_not_touch_dimension(
         "persist_parsing_results regenerated embeddings for unchanged chunks"
     )
 
+    modified_chunk = CodeChunk(
+        repo_id="p11", file_path="m.py", symbol_name=None,
+        line_start=0, line_end=5,
+        content="def f0():\n    return 42\n",
+        content_hash="modified-hash0", language="python",
+    )
+    modified_parse_res = ParsingPipelineResult(
+        repo_id="p11",
+        symbols=parse_res.symbols,
+        edges=[],
+        chunks=[modified_chunk, _mk_chunk(1)],
+    )
+    async with SessionLocal() as session:
+        await persistence.persist_parsing_results(
+            session, manifest, modified_parse_res,
+            incremental_files=["m.py"],
+            embedding_service=service,
+            embedding_model="tracked-model",
+            embedding_provider="tracked",
+        )
+        await session.commit()
+
+    assert provider.embed_calls == fresh_embed_calls + 1, (
+        "a changed chunk must be re-embedded while an unchanged sibling is reused"
+    )
+
     # All chunks have embeddings with the same provenance and no duplicates.
     from sqlalchemy import select, func
     from packages.knowledge.models import CodeChunkModel

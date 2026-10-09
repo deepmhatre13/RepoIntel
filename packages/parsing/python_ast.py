@@ -38,6 +38,15 @@ class PythonASTVisitor(ast.NodeVisitor):
         self.current_class: Optional[str] = None
         self.current_symbol: Optional[str] = None
 
+    @staticmethod
+    def _declaration_start(node) -> int:
+        decorator_lines = [
+            decorator.lineno
+            for decorator in getattr(node, "decorator_list", [])
+            if hasattr(decorator, "lineno")
+        ]
+        return min([node.lineno, *decorator_lines])
+
     def visit_Import(self, node: ast.Import):
         for alias in node.names:
             self.edges.append(CallEdge(
@@ -61,7 +70,7 @@ class PythonASTVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef):
-        line_start = node.lineno
+        line_start = self._declaration_start(node)
         line_end = getattr(node, "end_lineno", line_start)
         docstring = ast.get_docstring(node)
         
@@ -101,7 +110,7 @@ class PythonASTVisitor(ast.NodeVisitor):
         self._handle_function(node, is_async=True)
 
     def _handle_function(self, node, is_async: bool = False):
-        line_start = node.lineno
+        line_start = self._declaration_start(node)
         line_end = getattr(node, "end_lineno", line_start)
         docstring = ast.get_docstring(node)
         

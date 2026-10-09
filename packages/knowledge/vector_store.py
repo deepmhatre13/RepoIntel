@@ -137,6 +137,14 @@ class VectorStore:
             self._bm25_dirty = True
         return removed
 
+    def repository_content_hash(self, repo_id: str) -> str:
+        """Return a stable fingerprint for the currently indexed repo chunks."""
+        descriptors = sorted(
+            f"{chunk.file_path}:{chunk.line_start}:{chunk.line_end}:{chunk.content_hash}"
+            for chunk in self._repo_chunks(repo_id)
+        )
+        return hashlib.sha256("\n".join(descriptors).encode("utf-8")).hexdigest()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -224,14 +232,26 @@ class VectorStore:
             for score, i in scored[:top_k]
         ]
 
-    def hybrid_search(self, repo_id: str, query: str, top_k: int = 10) -> List[RetrievedEvidenceItem]:
+    def hybrid_search(
+        self,
+        repo_id: str,
+        query: str,
+        top_k: int = 10,
+        *,
+        vector_query: Optional[str] = None,
+        keyword_query: Optional[str] = None,
+    ) -> List[RetrievedEvidenceItem]:
         """Combine lexical + semantic retrieval via reciprocal-rank fusion (RRF)."""
         chunks = self._repo_chunks(repo_id)
         if not chunks:
             return []
 
-        vector_hits = self.vector_search(repo_id, query, top_k=top_k * 2)
-        keyword_hits = self.keyword_search(repo_id, query, top_k=top_k * 2)
+        vector_hits = self.vector_search(
+            repo_id, vector_query or query, top_k=top_k * 2
+        )
+        keyword_hits = self.keyword_search(
+            repo_id, keyword_query or query, top_k=top_k * 2
+        )
 
         fused: Dict[str, Dict[str, object]] = {}
         k = 60.0

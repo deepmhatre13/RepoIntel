@@ -1,10 +1,10 @@
 """Celery tasks for RepoIntel background processing.
 
-Four canonical tasks matching the 4-week plan:
+Core tasks matching the 4-week plan:
     ingest_repository    Clone + filter + metadata -> IngestionManifest
     parse_repository     AST + symbol graph + chunks
     index_repository     Embed chunks -> vector store
-    run_agent_graph      Execute LangGraph agent pipeline
+    run_repository_analysis Full API analysis through the canonical orchestrator
 
 Runtime note:
     Celery workers run tasks in worker threads/processes without an event loop.
@@ -27,7 +27,7 @@ from sqlalchemy import select
 from packages.worker.celery_app import celery_app
 from packages.knowledge.db import AsyncSessionLocal
 from packages.knowledge.models import (
-    RepositoryModel, PipelineRunModel, ArtifactModel,
+    RepositoryModel, PipelineRunModel,
 )
 from packages.knowledge.embeddings import create_embedding_service
 from packages.knowledge.vector_store import VectorStore
@@ -385,105 +385,6 @@ async def _async_index(task, run_id: str, repo_id: str, local_path: str) -> Dict
         raise
 
 
-# Task 4: Run agent graph (LangGraph pipeline)
-
-@celery_app.task(
-    name="packages.worker.tasks.run_agent_graph",
-    bind=True,
-    max_retries=1,
-    default_retry_delay=30,
-    acks_late=True,
-    time_limit=1800,
-    soft_time_limit=1500,
-)
-def run_agent_graph(
-    self,
-    run_id: str,
-    repo_id: str,
-    artifact_type: str = "README",
-) -> Dict[str, Any]:
-    """Execute the LangGraph agent pipeline to generate an artifact."""
-    return _run_async(_async_run_agent(self, run_id, repo_id, artifact_type))
-
-
-async def _async_run_agent(
-    task, run_id: str, repo_id: str, artifact_type: str
-) -> Dict[str, Any]:
-    from packages.agentic.llm_client import LLMClient
-    from packages.agentic.graphs.phase1_main_graph import build_main_graph
-
-    started = time.monotonic()
-    async with AsyncSessionLocal() as session:
-        await _persist_run_state(
-            session, run_id,
-            status="RUNNING", stage="ANALYZING", progress=85.0,
-        )
-
-    task.update_state(state="ANALYZING", meta={"run_id": run_id, "progress": 85})
-
-    try:
-        vector_store = VectorStore(create_embedding_service())
-        async with AsyncSessionLocal() as session:
-            facade = RepositoryFacade(session, vector_store)
-            llm_client = LLMClient()
-
-            graph = build_main_graph(llm_client, facade)
-
-            from packages.agentic.state.schema import RepoIntelState
-            initial_state = RepoIntelState(
-                repo_id=repo_id,
-                run_id=run_id,
-                artifact_type=artifact_type,
-            )
-
-            config = {"configurable": {"thread_id": run_id}}
-            final_state = await graph.ainvoke(initial_state, config=config)
-
-            artifact_content = ""
-            if hasattr(final_state, "artifact_draft") and final_state.artifact_draft:
-                artifact_content = "\n".join(
-                    d.content if hasattr(d, "content") else str(d)
-                    for d in final_state.artifact_draft
-                )
-
-            if artifact_content:
-                artifact = ArtifactModel(
-                    run_id=run_id,
-                    artifact_type=artifact_type,
-                    content=artifact_content,
-                    version=1,
-                )
-                session.add(artifact)
-                await session.commit()
-
-            duration = round(time.monotonic() - started, 3)
-
-            await _persist_run_state(
-                session, run_id,
-                status="COMPLETE", stage="COMPLETE", progress=100.0,
-                result_json={
-                    "artifact_generated": bool(artifact_content),
-                    "artifact_length": len(artifact_content),
-                    "duration": duration,
-                },
-            )
-
-        task.update_state(state="COMPLETE", meta={"run_id": run_id, "progress": 100})
-
-        return {
-            "repo_id": run_id,
-            "status": "COMPLETE",
-            "artifact_generated": bool(artifact_content),
-            "artifact_length": len(artifact_content),
-            "duration": duration,
-        }
-    except Exception as exc:
-        logger.exception("Agent graph failed for %s", run_id)
-        async with AsyncSessionLocal() as session:
-            await _persist_run_state(
-                session, run_id, status="FAILED", error=str(exc),
-            )
-        raise
 # ---------------------------------------------------------------------------
 # Canonical production task: full analysis via the single pipeline orchestrator.
 #

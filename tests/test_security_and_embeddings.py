@@ -250,3 +250,48 @@ class TestEmbeddingService:
         _provider = LocalSentenceTransformerProvider(model_name="dummy")
         assert _provider.provider_name == "local"
         assert _provider.model_name == "dummy"
+
+
+def test_invalid_generated_embedding_component_is_reported(monkeypatch):
+    from unittest.mock import Mock
+
+    from packages.knowledge.persistence import _validate_embedding
+    from packages.knowledge import persistence
+
+    error_logger = Mock()
+    monkeypatch.setattr(persistence, "logger", error_logger)
+    vector = [0.125] * 384
+    vector[2] = "ul"
+
+    with pytest.raises(ValueError, match="could not convert string to float: 'ul'"):
+        _validate_embedding(
+            vector,
+            384,
+            repo_id="repo-diagnostic",
+            source="newly_generated",
+        )
+
+    assert error_logger.error.call_count == 1
+    message, *arguments = error_logger.error.call_args.args
+    diagnostic = message % tuple(arguments)
+    assert "repo_id=repo-diagnostic" in diagnostic
+    assert "source=newly_generated" in diagnostic
+    assert "value_type=list" in diagnostic
+    assert "length=384" in diagnostic
+    assert "failing_index=2" in diagnostic
+    assert "failing_value='ul'" in diagnostic
+
+
+def test_embedding_validation_accepts_valid_384_and_rejects_bad_values():
+    from packages.knowledge.persistence import _validate_embedding
+
+    valid_vector = [0.125] * 384
+    _validate_embedding(valid_vector, 384)
+
+    with pytest.raises(ValueError, match="Embedding dimension mismatch"):
+        _validate_embedding(valid_vector[:-1], 384)
+
+    non_finite_vector = list(valid_vector)
+    non_finite_vector[10] = float("nan")
+    with pytest.raises(ValueError, match="non-finite"):
+        _validate_embedding(non_finite_vector, 384)

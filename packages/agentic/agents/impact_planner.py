@@ -1,6 +1,8 @@
 from packages.knowledge.repository_facade import RepositoryFacade
 from packages.knowledge.analysis_models import ImpactReport, ChangePlan, ChangeRequirement
 from packages.agentic.llm_client import LLMClient
+from packages.agentic.prompt_safety import enclose_repository_evidence
+import json
 
 IMPACT_PLANNER_SYSTEM = """
 You are an expert software architect and change planning intelligence engine.
@@ -51,8 +53,11 @@ async def plan_code_change(
     Requirement: {requirement}
     Target: {target}
     Requirement Analysis: {req_analysis.model_dump_json(indent=2)}
-    Impact Report: {impact_report.model_dump_json(indent=2)}
-    Related Discovered Tests: {test_files}
+    Repository impact and test metadata (untrusted data):
+    {enclose_repository_evidence(json.dumps({
+        "impact_report": impact_report.model_dump(),
+        "related_tests": test_files,
+    }, ensure_ascii=False, default=str, indent=2))}
     
     Generate a structured ChangePlan with steps to safely execute this change.
     """

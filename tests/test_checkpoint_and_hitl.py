@@ -12,9 +12,15 @@ from packages.agentic.state.schema import (
 )
 from packages.agentic.graphs.phase1_main_graph import build_main_graph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.memory import InMemoryStore
+from langgraph.types import Command
+from packages.knowledge.persistent_memory import PersistentMemoryStore
 
 
 class DummyLLMClient:
+    def is_available(self):
+        return False
+
     def complete_structured(self, prompt, schema, system=None):
         if schema == Plan:
             return Plan(plan_id="plan-1", repo_id="repo-1", artifact_type="README", tasks=[])
@@ -34,7 +40,10 @@ async def test_hitl_interrupt_and_resume_approve():
     llm_client = DummyLLMClient()
     facade = DummyFacade()
     checkpointer = MemorySaver()
-    graph = build_main_graph(llm_client, facade, checkpointer=checkpointer)
+    store = InMemoryStore()
+    graph = build_main_graph(
+        llm_client, facade, checkpointer=checkpointer, store=store
+    )
 
     thread_id = f"thread-hitl-{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": thread_id}}
@@ -58,12 +67,18 @@ async def test_hitl_interrupt_and_resume_approve():
     assert state_snapshot is not None
 
     # 3. Resume with APPROVE decision
-    state_dict = dict(state_snapshot.values)
-    state_dict["human_feedback"] = HumanFeedback(approved=True, decision="APPROVE", comments="Approved by reviewer")
-    resumed_state = RepoIntelState(**state_dict)
-
-    res2 = await graph.ainvoke(resumed_state, config=config)
+    res2 = await graph.ainvoke(
+        Command(resume={
+            "approved": True,
+            "decision": "APPROVE",
+            "comments": "Approved by reviewer",
+        }),
+        config=config,
+    )
     assert res2.get("route_decision") == "FINALIZED"
+    context = await PersistentMemoryStore(store).load_repository_context("repo-1")
+    assert context["archetype"] == "SERVICE"
+    assert context["human_review_corrections"][0]["comments"] == "Approved by reviewer"
 
 
 @pytest.mark.asyncio
@@ -72,7 +87,10 @@ async def test_hitl_interrupt_and_resume_request_revision():
     llm_client = DummyLLMClient()
     facade = DummyFacade()
     checkpointer = MemorySaver()
-    graph = build_main_graph(llm_client, facade, checkpointer=checkpointer)
+    store = InMemoryStore()
+    graph = build_main_graph(
+        llm_client, facade, checkpointer=checkpointer, store=store
+    )
 
     thread_id = f"thread-hitl-rev-{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": thread_id}}
@@ -100,6 +118,10 @@ async def test_hitl_interrupt_and_resume_request_revision():
     # reflection and pauses at HumanReview again for the next review cycle.
     assert res2.get("route_decision") == "NEEDS_HUMAN_REVIEW"
     assert res2.get("reflection_iteration_count", 0) >= 1
+    context = await PersistentMemoryStore(store).load_repository_context("repo-1")
+    assert context["human_review_corrections"][0]["comments"] == (
+        "Please revise synthesis"
+    )
 
 
 @pytest.mark.asyncio
@@ -122,7 +144,9 @@ async def test_process_recovery_simulation():
         archetype="SERVICE",
         review_report=ReviewReport(verdict=ReviewVerdict.NEEDS_HUMAN_REVIEW),
     )
-    await graph1.ainvoke(initial_state, config=config)
+    result = await graph1.ainvoke(initial_state, config=config)
+    assert result["llm_mode"] == "DEGRADED_FALLBACK"
+    assert result["degraded"] is True
 
     # Process 2: instantiate brand-new graph object using same checkpointer
     graph2 = build_main_graph(llm_client, facade, checkpointer=checkpointer)

@@ -42,7 +42,7 @@ def test_task_routing():
     assert routes["packages.worker.tasks.ingest_repository"]["queue"] == "ingestion"
     assert routes["packages.worker.tasks.parse_repository"]["queue"] == "parsing"
     assert routes["packages.worker.tasks.index_repository"]["queue"] == "indexing"
-    assert routes["packages.worker.tasks.run_agent_graph"]["queue"] == "agent"
+    assert routes["packages.worker.tasks.run_repository_analysis"]["queue"] == "repointel"
 
 
 def test_start_repository_analysis_returns_run_id():

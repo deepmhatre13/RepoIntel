@@ -16,12 +16,14 @@ ensure_configured()
 
 
 from packages.ingestion import run_ingestion_pipeline, cleanup_repository
+from packages.ingestion.security import validate_local_repo_path
 from packages.parsing import run_parsing_pipeline
 from packages.knowledge import (
     init_db, AsyncSessionLocal, EmbeddingService, VectorStore,
     persist_parsing_results, RepositoryFacade
 )
 from packages.agentic import LLMClient, RepoIntelState, build_main_graph
+from packages.agentic.llm_client import should_run_degraded_artifact_generation
 from packages.runtime.pipeline_orchestrator import RepositoryAnalysisPipeline
 
 console = Console()
@@ -59,7 +61,16 @@ async def analyze_repo(repo_url: str, output_dir: str = "./output", artifact_typ
     repo_id = str(uuid.uuid5(uuid.NAMESPACE_URL, repo_url))
 
     console.print("[yellow]Stage 1/8: Ingestion...[/yellow]")
-    manifest, filtered_files = run_ingestion_pipeline(repo_url)
+    allowed_local_root = None
+    if os.path.isdir(repo_url):
+        local_path = validate_local_repo_path(
+            repo_url,
+            os.path.dirname(os.path.realpath(repo_url)),
+        )
+        allowed_local_root = os.path.dirname(local_path.path)
+    manifest, filtered_files = run_ingestion_pipeline(
+        repo_url, allowed_local_root=allowed_local_root
+    )
     
     from packages.ingestion.git_history import parse_git_commits, persist_git_commits
     commits = parse_git_commits(manifest.local_path, max_depth=50)
@@ -101,7 +112,6 @@ async def analyze_repo(repo_url: str, output_dir: str = "./output", artifact_typ
         console.print(f"[yellow]Stage 5/8: Agentic Analysis ({artifact_type})...[/yellow]")
         llm_client = LLMClient()
         run_id = str(uuid.uuid4())
-        app = build_main_graph(llm_client, facade)
         initial_state = RepoIntelState(
             run_id=run_id,
             thread_id=str(uuid.uuid4()),
@@ -110,21 +120,44 @@ async def analyze_repo(repo_url: str, output_dir: str = "./output", artifact_typ
             archetype=manifest.archetype.value if hasattr(manifest.archetype, 'value') else str(manifest.archetype),
             artifact_type=artifact_type
         )
-        final_state_dict = await app.ainvoke(initial_state.model_dump())
-        final_state = RepoIntelState.model_validate(final_state_dict)
+        artifact_skipped = (
+            not llm_client.is_available()
+            and not should_run_degraded_artifact_generation()
+        )
+        if artifact_skipped:
+            console.print(
+                "[yellow]Gemini unavailable; skipping artifact generation. "
+                "Deterministic indexing completed.[/yellow]"
+            )
+            final_state = initial_state.model_copy(update={
+                "llm_mode": "LLM_UNAVAILABLE",
+                "degraded": True,
+            })
+        else:
+            app = build_main_graph(llm_client, facade)
+            final_state_dict = await app.ainvoke(initial_state.model_dump())
+            final_state = RepoIntelState.model_validate(final_state_dict)
 
         console.print("[yellow]Stage 6/8: Artifact Generation...[/yellow]")
         os.makedirs(output_dir, exist_ok=True)
         ext = ".md" if not artifact_type.endswith(".md") else ""
-        artifact_path = os.path.join(output_dir, f"{artifact_type.lower()}{ext}")
+        artifact_path = (
+            "Skipped (Gemini unavailable)" if artifact_skipped
+            else os.path.join(output_dir, f"{artifact_type.lower()}{ext}")
+        )
         artifact_content = ""
         total_citations = 0
         if final_state.artifact_draft:
-            lines = []
-            for sec in final_state.artifact_draft.sections:
-                lines.append(f"## {sec.section_title}\n\n{sec.content}\n")
-                total_citations += len(sec.citations)
-            artifact_content = "\n".join(lines)
+            from packages.agentic.artifact_rendering import render_artifact
+
+            artifact_content = render_artifact(
+                final_state.artifact_draft,
+                final_state.llm_mode,
+                final_state.degraded,
+            )
+            total_citations = sum(
+                len(section.citations) for section in final_state.artifact_draft.sections
+            )
             with open(artifact_path, "w", encoding="utf-8") as f:
                 f.write(artifact_content)
         artifact_id = await _persist_artifact(session, run_id, artifact_type, artifact_content)
@@ -137,12 +170,18 @@ async def analyze_repo(repo_url: str, output_dir: str = "./output", artifact_typ
         await session.merge(AgentRunModel(
             run_id=run_id,
             repo_id=repo_id,
-            status="COMPLETED" if review_verdict != "NEEDS_HUMAN_REVIEW" else "NEEDS_HUMAN_REVIEW",
+            status=(
+                "SKIPPED" if artifact_skipped
+                else "COMPLETED" if review_verdict != "NEEDS_HUMAN_REVIEW"
+                else "NEEDS_HUMAN_REVIEW"
+            ),
             result_json=json.dumps({
                 "repo_id": repo_id,
                 "repo_url": repo_url,
                 "artifact_type": artifact_type,
                 "review_verdict": review_verdict,
+                "llm_mode": final_state.llm_mode,
+                "degraded": final_state.degraded,
             }),
         ))
 

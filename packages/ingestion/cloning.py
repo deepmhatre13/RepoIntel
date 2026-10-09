@@ -16,7 +16,7 @@ import urllib.parse
 import stat
 
 from packages.ingestion.exceptions import InvalidRepositoryError, CloneFailedError, RepoTooLargeError
-from packages.ingestion.security import validate_repo_url
+from packages.ingestion.security import validate_local_repo_path, validate_repo_url
 
 
 def _redact_url(value: str, repo_url: str) -> str:
@@ -107,13 +107,23 @@ def _run_git_clone(repo_url: str, target_dir: str, timeout_seconds: float) -> No
         )
 
 
-def clone_repository(repo_url: str, max_repo_size_mb: float = 500.0, clone_timeout_seconds: int = 180) -> str:
+def clone_repository(
+    repo_url: str,
+    max_repo_size_mb: float = 500.0,
+    clone_timeout_seconds: int = 180,
+    *,
+    allowed_local_root: str | None = None,
+) -> str:
     """Clone a repository with size cap and timeout.
 
     Returns the path to the temporary checkout.
     Raises InvalidRepositoryError, CloneFailedError, RepoTooLargeError.
     """
-    parsed = validate_repo_url(repo_url)
+    if allowed_local_root is not None and os.path.isdir(repo_url):
+        parsed = validate_local_repo_path(repo_url, allowed_local_root)
+        repo_url = parsed.path
+    else:
+        parsed = validate_repo_url(repo_url)
 
     # Local directory — copy instead of clone.
     if parsed.scheme == "local":

@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
+from packages.shared.llm_mode import LLMMode
 
 class TaskStatus(str, Enum):
     PENDING = "PENDING"
@@ -22,6 +23,7 @@ class Plan(BaseModel):
     plan_id: str
     repo_id: str
     artifact_type: str = "README"
+    document_outline: List[str] = Field(default_factory=list)
     tasks: List[PlanTask] = Field(default_factory=list)
 
 class EvidenceCitation(BaseModel):
@@ -86,6 +88,8 @@ class RepoIntelState(BaseModel):
     repo_url: str
     archetype: str
     artifact_type: str = "README"
+    degraded: bool = False
+    llm_mode: LLMMode = "LIVE_GEMINI"
     
     # Multi-Repository Intelligence (Phase 16)
     active_repository_ids: List[str] = Field(default_factory=list)

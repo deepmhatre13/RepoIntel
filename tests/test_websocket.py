@@ -10,6 +10,7 @@ from packages.websocket.event_stream import (
     EventType,
     create_job_event,
 )
+from packages.runtime.pipeline_orchestrator import _stream_langgraph_events
 
 
 class TestJobEvent:
@@ -148,3 +149,50 @@ class TestEventTypes:
         assert EventType.INGESTION_STARTED.value == "ingestion_started"
         assert EventType.PARSING_COMPLETED.value == "parsing_completed"
         assert EventType.JOB_FAILED.value == "job_failed"
+
+
+class TestLangGraphEventBridge:
+    @pytest.mark.asyncio
+    async def test_streams_graph_events_and_returns_root_output(self):
+        class Chunk:
+            content = "hello"
+
+        class Graph:
+            async def astream_events(self, initial_state, config, version):
+                assert initial_state == {"value": 1}
+                assert version == "v2"
+                yield {
+                    "event": "on_chain_start",
+                    "name": "synthesize_section",
+                    "run_id": "event-1",
+                    "parent_ids": ["root"],
+                    "metadata": {"langgraph_node": "Synthesis"},
+                    "data": {"input": {"value": 1}},
+                }
+                yield {
+                    "event": "on_chat_model_stream",
+                    "name": "model",
+                    "run_id": "event-2",
+                    "parent_ids": ["root", "node"],
+                    "metadata": {},
+                    "data": {"chunk": Chunk()},
+                }
+                yield {
+                    "event": "on_chain_end",
+                    "name": "LangGraph",
+                    "run_id": "root",
+                    "parent_ids": [],
+                    "metadata": {},
+                    "data": {"output": {"value": 2}},
+                }
+
+        manager = EventStreamManager()
+        result = await _stream_langgraph_events(
+            Graph(), {"value": 1}, {"configurable": {}}, "run-1", manager
+        )
+
+        assert result == {"value": 2}
+        history = manager.get_history("run-1")
+        assert len(history) == 3
+        assert history[0]["data"]["node"] == "Synthesis"
+        assert history[1]["data"]["token"] == "hello"

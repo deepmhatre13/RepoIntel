@@ -67,6 +67,19 @@ only on it. Capability implementations live in focused mixins under
 `packages/knowledge/facade/`. Runtime infrastructure (orchestrator, lifecycle,
 recovery, resource management) lives outside the facade by design.
 
+### Agent Stacks
+
+The LangGraph Planner/Retriever/Synthesis/Reviewer pipeline is used for artifact
+generation initiated by `POST /repositories/{id}/analyze` and the full-analysis
+CLI flow. Artifact retrieval, `qa_analyst`, the public `ask_repository` tool,
+and the adaptive CLI's `retrieve_evidence` tool share
+`packages/agentic/core/tool_loop.py`; the graph wraps results as task evidence,
+while Q&A adds its relevance gate and single-turn synthesis. Copilot
+investigation and adaptive planning/reflection remain higher-level paths, but
+do not define another `ToolCallDecision` retrieval loop. Responses record the
+actual model tier; graph artifact runs persist `llm_mode` and `degraded` in
+their agent-run result metadata.
+
 ## Technology Stack
 
 Python 3.12 · SQLAlchemy 2.0 (async) · Alembic · FastAPI · Pydantic v2 ·
@@ -93,9 +106,16 @@ Copy `.env.example` to `.env` and fill in values. **Never commit `.env`.**
 | `CELERY_RESULT_BACKEND` | Redis result backend for Celery | `redis://localhost:6379/1` |
 | `GOOGLE_API_KEY` | Gemini API key | *(none — degraded mode)* |
 | `GEMINI_MODEL` | Gemini model id | `gemini-3.8-flash` |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Enable Langfuse tracing for graph and model calls | *(unset — tracing disabled)* |
+| `LANGFUSE_BASE_URL` | Langfuse server URL (local or self-hosted) | `http://localhost:3000` |
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
 | `EMBEDDING_PROVIDER` | Embedding provider (`local` = sentence-transformers) | `local` |
 | `EMBEDDING_MODEL` | Pretrained sentence-transformers model id | `all-MiniLM-L6-v2` |
+| `REPOINTEL_RERANKER_MODEL` | Local sentence-transformers CrossEncoder model | `BAAI/bge-reranker-v2-m3` |
+| `REPOINTEL_RERANKER_DEVICE` | CrossEncoder device | `cpu` |
+| `REPOINTEL_RERANKER_ALLOW_DOWNLOAD` | Allow fetching the reranker from Hugging Face when it is not cached | `0` |
+| `REPOINTEL_RETRIEVAL_CACHE_URL` | Redis URL for semantic retrieval results | `redis://localhost:6379/2` |
+| `REPOINTEL_RETRIEVAL_CACHE_TTL` | Retrieval result cache lifetime in seconds | `3600` |
 | `EMBEDDING_BATCH_SIZE` | Embedding batch size (provider level) | `32` |
 | `MAX_REPOSITORY_FILES` | File-count budget | `20000` |
 | `MAX_FILE_SIZE` | Per-file size budget (bytes) | `2097152` |
@@ -108,6 +128,12 @@ Copy `.env.example` to `.env` and fill in values. **Never commit `.env`.**
 | `MAX_CONTEXT_TOKENS` | Context budget for prompts | `8000` |
 | `MAX_LLM_CALLS` | Hard LLM call cap per run | `25` |
 | `MAX_EXECUTION_SECONDS` | Run execution deadline | `900` |
+
+The BGE reranker runs locally through `sentence-transformers`. By default RepoIntel
+uses a cached model only and falls back to lexical reranking when the model is not
+present; set `REPOINTEL_RERANKER_ALLOW_DOWNLOAD=1` to permit the first model download.
+Retrieval caching is fail-open when Redis is unavailable; cached entries are keyed by
+the repository's current indexed-content hash, so re-indexing causes an automatic miss.
 
 ## Local Development (no Docker required)
 
@@ -296,8 +322,13 @@ Metrics include Recall@K, Precision@K and MRR over expected files, plus claim-su
 ratios for grounding quality. Baselines (naive LLM, simple vector RAG) live in
 ## Limitations
 
-- Without `GOOGLE_API_KEY`, LLM synthesis runs in deterministic degraded mode;
-  answers are explicitly marked as such and carry lower confidence.
+- Without `GOOGLE_API_KEY`, chat/copilot responses mark degraded operation and
+  artifact generation is skipped by the shared policy unless explicitly enabled.
+  Graph runs that do use deterministic fallback record `llm_mode=DEGRADED_FALLBACK`
+  and `degraded=true`; their reviewer cannot automatically approve the result.
+- Degraded artifact plans use deterministic templates selected by artifact type;
+  they are not adaptive LLM plans. Unknown planner evidence categories are
+  normalized to a supported evidence type before retrieval.
 - Embeddings use a real pretrained sentence-transformers model (`all-MiniLM-L6-v2`
   by default, configurable via `EMBEDDING_MODEL`). If the model cannot initialize,
   the failure is reported explicitly, semantic retrieval is marked unavailable, and
@@ -318,7 +349,13 @@ ratios for grounding quality. Baselines (naive LLM, simple vector RAG) live in
 - **Secret hygiene.** `.env` is never committed; API keys are read from the
   environment and are excluded from logs, artifacts and evidence payloads.
 - **Untrusted input.** Repositories are cloned/read-only inputs; parsing is
-  AST-based with bounded resources and no dynamic imports.
+  AST-based with bounded resources and no dynamic imports. API repository URLs
+  cannot name local paths; CLI local paths require an explicit allowed root, and
+  symbolic links are excluded from indexing.
+- **Prompt injection.** Retrieved repository text is passed as nonce-bounded,
+  explicitly untrusted data with system instructions not to follow embedded
+  commands. This is a defense-in-depth prompt boundary, not a guarantee that a
+  model can never be influenced by malicious content.
 - **Auditable output.** Every answer carries citations and run identifiers so
   results can be traced back to source evidence.
 

@@ -22,9 +22,9 @@ Design:
 """
 
 import ipaddress
-import os
 import socket
 import urllib.parse
+from pathlib import Path
 from typing import Set
 
 from packages.ingestion.exceptions import InvalidRepositoryError
@@ -158,10 +158,6 @@ def validate_repo_url(url: str) -> urllib.parse.ParseResult:
 
     url = url.strip()
 
-    # Local filesystem path — allowed, no SSRF concern.
-    if os.path.isdir(url):
-        return urllib.parse.ParseResult(scheme="local", path=url, params="", query="", fragment="", netloc="")
-
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception as exc:
@@ -170,7 +166,7 @@ def validate_repo_url(url: str) -> urllib.parse.ParseResult:
     if parsed.scheme not in _ALLOWED_SCHEMES:
         raise InvalidRepositoryError(
             f"Unsupported scheme '{parsed.scheme}' for URL: {url!r}. "
-            f"Allowed: {sorted(_ALLOWED_SCHEMES)} or a local directory path."
+            f"Allowed: {sorted(_ALLOWED_SCHEMES)}."
         )
 
     hostname = parsed.hostname
@@ -185,6 +181,30 @@ def validate_repo_url(url: str) -> urllib.parse.ParseResult:
     _validate_port(parsed)
 
     return parsed
+
+
+def validate_local_repo_path(path: str, allowed_root: str) -> urllib.parse.ParseResult:
+    """Validate an explicit local CLI path against its configured root."""
+    if not isinstance(path, str) or not path.strip():
+        raise InvalidRepositoryError(f"Invalid repository path: {path!r}")
+    if not isinstance(allowed_root, str) or not allowed_root.strip():
+        raise InvalidRepositoryError("An allowed root is required for local repository paths")
+
+    try:
+        candidate = Path(path).resolve(strict=True)
+        root = Path(allowed_root).resolve(strict=True)
+        candidate.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise InvalidRepositoryError(
+            f"Local repository path must exist within the allowed root: {path!r}"
+        ) from exc
+
+    if not candidate.is_dir() or not root.is_dir():
+        raise InvalidRepositoryError("Local repository path and allowed root must be directories")
+
+    return urllib.parse.ParseResult(
+        scheme="local", netloc="", path=str(candidate), params="", query="", fragment=""
+    )
 
 
 def validate_redirect_url(original_url: str, redirect_url: str) -> urllib.parse.ParseResult:

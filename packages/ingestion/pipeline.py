@@ -5,8 +5,19 @@ from packages.ingestion.cloning import clone_repository, cleanup_repository
 from packages.ingestion.filtering import filter_repository
 from packages.ingestion.metadata import extract_metadata, detect_archetype
 
-def run_ingestion_pipeline(repo_url: str, max_repo_size_mb: float = 500.0, clone_timeout_seconds: int = 180) -> Tuple[IngestionManifest, list[str]]:
-    temp_dir = clone_repository(repo_url, max_repo_size_mb, clone_timeout_seconds)
+def run_ingestion_pipeline(
+    repo_url: str,
+    max_repo_size_mb: float = 500.0,
+    clone_timeout_seconds: int = 180,
+    *,
+    allowed_local_root: str | None = None,
+) -> Tuple[IngestionManifest, list[str]]:
+    temp_dir = clone_repository(
+        repo_url,
+        max_repo_size_mb,
+        clone_timeout_seconds,
+        allowed_local_root=allowed_local_root,
+    )
     try:
         filtered_files = filter_repository(temp_dir)
         languages, manifest_files, entrypoints, ci_configs = extract_metadata(temp_dir, filtered_files)

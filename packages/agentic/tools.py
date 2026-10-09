@@ -309,58 +309,61 @@ class RepoIntelTools:
                           [ToolParameter("query", "string", "Search query")],
                           category="retrieval")
     async def tool_retrieve_evidence(self, facade, repository_id, kwargs):
+        from packages.agentic.core.tool_loop import run_tool_selection_loop
+        from packages.agentic.llm_client import LLMClient
+
         query = _require(kwargs, "query")
-        try:
-            seat = await facade.search_code(repository_id, query, top_k=8)
-            return {"results": seat.get("results", []) if isinstance(seat, dict) else seat}
-        except Exception:
-            items = facade.hybrid_search(repository_id, query, top_k=8)
-            return {"results": [i.to_dict() for i in items], "strategy": "hybrid"}
+        llm = self.llm_client or LLMClient()
+        result = await run_tool_selection_loop(
+            llm,
+            facade,
+            objective=query,
+            max_rounds=3,
+            repo_id=repository_id,
+            query=query,
+            target_section="Repository evidence",
+            task_id="adaptive-retrieval",
+        )
+        return {
+            "results": [item.to_dict() for item in result.retrieved_items],
+            "strategy": "shared_tool_loop",
+            "reasoning": result.evidence.reasoning,
+        }
 
     @_repo_tool_decorator("get_security_findings",
                           "Return persisted security findings for the repository.",
                           [], category="security")
     async def tool_get_security_findings(self, facade, repository_id, kwargs):
-        from packages.knowledge.models import SecurityFindingModel
-        from sqlalchemy import select
-        result = await facade.session.execute(
-            select(SecurityFindingModel).where(SecurityFindingModel.repo_id == repository_id)
-        )
-        rows = result.scalars().all()
-        return {
-            "findings": [
-                {
-                    "rule_id": r.rule_id, "severity": r.severity, "message": r.message,
-                    "file_path": r.file_path, "line_start": r.line_start, "line_end": r.line_end,
-                    "finding_type": r.finding_type, "source_endpoint": r.source_endpoint,
-                }
-                for r in rows
-            ],
-            "count": len(rows),
-        }
+        findings = await facade.get_security_findings(repository_id)
+        return {"findings": findings, "count": len(findings)}
 
     @_repo_tool_decorator("ask_repository",
-                          "Full agentic Q&A: planner selects tools, evidence is gathered, "
-                          "Gemini synthesizes (deterministic degraded mode otherwise).",
+                          "Repository Q&A using the shared retrieval core and grounded synthesis.",
                           [ToolParameter("question", "string", "Natural-language question")],
                           category="agent")
     async def tool_ask_repository(self, facade, repository_id, kwargs):
-        from packages.agentic.adaptive_agent import build_adaptive_agent
         from packages.agentic.llm_client import LLMClient
+        from packages.agentic.agents.qa_analyst import answer_repository_query
+
         question = _require(kwargs, "question")
         llm = self.llm_client or LLMClient()
-        agent = build_adaptive_agent(self, llm)
-        state = await agent.ainvoke({
-            "question": str(question), "repository_id": repository_id,
-        })
+        answer = await answer_repository_query(
+            repository_id,
+            str(question),
+            facade,
+            llm,
+        )
         return {
-            "answer": state.get("final_answer"),
-            "retrieval_strategy": state.get("retrieval_strategy"),
-            "selected_tools": [t.get("tool_name") for t in state.get("selected_tools", [])],
-            "evidence_count": len(state.get("evidence", [])),
-            "confidence": state.get("confidence"),
-            "reflection_count": state.get("reflection_count"),
-            "degraded": state.get("degraded", False),
+            "answer": answer.answer,
+            "retrieval_strategy": "shared_tool_loop",
+            "selected_tools": ["run_tool_selection_loop"],
+            "evidence_count": len(answer.evidence),
+            "confidence": answer.confidence,
+            "reflection_count": 0,
+            "degraded": answer.degraded,
+            "llm_mode": answer.llm_mode,
+            "confidence_breakdown": answer.confidence_breakdown,
+            "audit": answer.audit,
         }
 # ---------------------------------------------------------------------------
 # Module-level helpers (validation/sanitisation).

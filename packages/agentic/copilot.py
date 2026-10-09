@@ -18,6 +18,7 @@ from packages.knowledge.health_engine import RepositoryHealthEngine
 from packages.knowledge.root_cause_analysis import RootCauseAnalysisEngine
 from packages.knowledge.change_simulation import EngineeringChangeSimulator
 from packages.agentic.llm_client import LLMClient
+from packages.shared.llm_mode import LLMMode
 
 
 class CopilotMode(str, Enum):
@@ -59,6 +60,8 @@ class EngineeringCopilotResponse(BaseModel):
     unresolved_questions: List[str] = Field(default_factory=list)
     human_review_required: bool = False
     execution_metadata: Dict[str, Any] = Field(default_factory=dict)
+    llm_mode: LLMMode = "LIVE_GEMINI"
+    degraded: bool = False
 
 
 class EngineeringCopilotBackend:
@@ -74,6 +77,17 @@ class EngineeringCopilotBackend:
         self.simulator = EngineeringChangeSimulator(facade, llm_client)
 
     async def execute(self, req: EngineeringCopilotRequest) -> EngineeringCopilotResponse:
+        response = await self._execute(req)
+        available = self.llm_client.is_available()
+        response.llm_mode = "LIVE_GEMINI" if available else "DEGRADED_FALLBACK"
+        response.degraded = not available
+        response.execution_metadata.update({
+            "llm_mode": response.llm_mode,
+            "degraded": response.degraded,
+        })
+        return response
+
+    async def _execute(self, req: EngineeringCopilotRequest) -> EngineeringCopilotResponse:
         repo_id = req.repository_id or "default_repo"
         mode = req.mode
 

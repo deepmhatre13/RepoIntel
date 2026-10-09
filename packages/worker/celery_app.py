@@ -96,6 +96,7 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
+    task_always_eager=os.getenv("CELERY_TASK_ALWAYS_EAGER", "0").lower() in ("1", "true", "yes"),
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
@@ -122,7 +123,6 @@ celery_app.conf.update(
         "packages.worker.tasks.ingest_repository": {"queue": "ingestion"},
         "packages.worker.tasks.parse_repository": {"queue": "parsing"},
         "packages.worker.tasks.index_repository": {"queue": "indexing"},
-        "packages.worker.tasks.run_agent_graph": {"queue": "agent"},
         # Canonical production task for normal API-triggered analysis.
         "packages.worker.tasks.run_repository_analysis": {"queue": "repointel"},
     },

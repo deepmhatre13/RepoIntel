@@ -8,6 +8,12 @@ modules are implementation details and must NOT be imported by agents or service
 """
 
 import json
+import asyncio
+import copy
+import hashlib
+import os
+import unicodedata
+from dataclasses import asdict
 from typing import List, Dict, Any, Optional
 
 from sqlalchemy import select
@@ -15,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.knowledge.models import (
     RepositoryModel,
+    FileModel,
+    CodeChunkModel,
     DependencyModel,
     SymbolModel,
     SymbolEdgeModel,
@@ -74,6 +82,85 @@ class RepositoryFacade(
         self.max_graph_nodes = max_graph_nodes
         self.reranker = EvidenceReranker()
         self.context_assembler = ContextAssembler()
+        self._retrieval_cache = None
+        self._retrieval_cache_initialized = False
+
+    def _redis_cache(self):
+        if self._retrieval_cache_initialized:
+            return self._retrieval_cache
+        self._retrieval_cache_initialized = True
+        try:
+            import redis
+
+            self._retrieval_cache = redis.Redis.from_url(
+                os.getenv(
+                    "REPOINTEL_RETRIEVAL_CACHE_URL",
+                    "redis://localhost:6379/2",
+                ),
+                socket_connect_timeout=0.05,
+                socket_timeout=0.05,
+                decode_responses=True,
+            )
+        except Exception:
+            self._retrieval_cache = None
+        return self._retrieval_cache
+
+    @staticmethod
+    def _normalize_cache_value(value):
+        if isinstance(value, str):
+            return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+        if isinstance(value, list):
+            return [RepositoryFacade._normalize_cache_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: RepositoryFacade._normalize_cache_value(item)
+                for key, item in sorted(value.items())
+            }
+        return value
+
+    def _retrieval_cache_key(self, repo_id, mode, query, top_k, options):
+        content_hash = self.vector_store.repository_content_hash(repo_id)
+        key_data = {
+            "repo_id": repo_id,
+            "content_hash": content_hash,
+            "mode": mode,
+            "query": self._normalize_cache_value(query),
+            "top_k": top_k,
+            "options": self._normalize_cache_value(options),
+        }
+        encoded = json.dumps(key_data, sort_keys=True, separators=(",", ":"))
+        return "repointel:retrieval:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _cached_retrieval(self, repo_id, mode, query, top_k, options):
+        cache = self._redis_cache()
+        if cache is None:
+            return None
+        try:
+            key = self._retrieval_cache_key(repo_id, mode, query, top_k, options)
+            payload = cache.get(key)
+            if payload is None:
+                return None
+            return [
+                RetrievedEvidenceItem(**item)
+                for item in json.loads(payload)
+            ]
+        except Exception:
+            return None
+
+    def _cache_retrieval(self, repo_id, mode, query, top_k, options, results):
+        cache = self._redis_cache()
+        if cache is None:
+            return
+        try:
+            key = self._retrieval_cache_key(repo_id, mode, query, top_k, options)
+            ttl = max(1, int(os.getenv("REPOINTEL_RETRIEVAL_CACHE_TTL", "3600")))
+            cache.setex(
+                key,
+                ttl,
+                json.dumps([asdict(item) for item in results]),
+            )
+        except Exception:
+            return
 
     # ------------------------------------------------------------------
     # Phase 1-21 core retrieval (stable facade orchestration stays here)
@@ -94,6 +181,56 @@ class RepositoryFacade(
             "manifest_data": json.loads(repo.manifest_data),
         }
 
+    async def get_quickstart_facts(self, repo_id: str) -> Dict[str, Any]:
+        manifest = await self.get_ingestion_manifest(repo_id)
+        if not manifest:
+            return {}
+        manifest_data = manifest.get("manifest_data", {})
+        file_result = await self.session.execute(
+            select(FileModel.file_path).where(FileModel.repo_id == repo_id)
+        )
+        file_paths = sorted(set(file_result.scalars().all()))
+        manifest_paths = set(manifest_data.get("manifest_files", []))
+        entrypoints = set(manifest_data.get("entrypoints", []))
+        candidate_paths = [
+            path for path in file_paths
+            if path in manifest_paths
+            or path in entrypoints
+            or path.replace("\\", "/").rsplit("/", 1)[-1].casefold().startswith((
+                "license", "copying", "pytest.ini", "tox.ini", "makefile", "justfile",
+            ))
+            or path.casefold().endswith("pyproject.toml")
+            or ".github/workflows/" in path.replace("\\", "/").casefold()
+        ][:100]
+        if not candidate_paths:
+            return {
+                "file_paths": file_paths,
+                "entrypoints": list(entrypoints),
+                "files": {},
+            }
+
+        chunk_result = await self.session.execute(
+            select(CodeChunkModel)
+            .where(
+                CodeChunkModel.repo_id == repo_id,
+                CodeChunkModel.file_path.in_(candidate_paths),
+            )
+            .order_by(CodeChunkModel.file_path, CodeChunkModel.line_start)
+            .limit(500)
+        )
+        files: Dict[str, List[Dict[str, Any]]] = {}
+        for chunk in chunk_result.scalars().all():
+            files.setdefault(chunk.file_path, []).append({
+                "line_start": chunk.line_start,
+                "line_end": chunk.line_end,
+                "content": chunk.content,
+            })
+        return {
+            "file_paths": file_paths,
+            "entrypoints": list(entrypoints),
+            "files": files,
+        }
+
     async def get_dependency_manifest(self, repo_id: str) -> List[Dict[str, Any]]:
         stmt = select(DependencyModel).where(DependencyModel.repo_id == repo_id)
         res = await self.session.execute(stmt)
@@ -107,6 +244,27 @@ class RepositoryFacade(
             }
             for d in deps
         ]
+
+    async def get_security_findings(self, repo_id: str) -> List[Dict[str, Any]]:
+        from packages.knowledge.models import SecurityFindingModel
+
+        stmt = select(SecurityFindingModel).where(SecurityFindingModel.repo_id == repo_id)
+        result = await self.session.execute(stmt)
+        rows = result.scalars().all()
+        return [
+            {
+                "rule_id": row.rule_id,
+                "severity": row.severity,
+                "message": row.message,
+                "file_path": row.file_path,
+                "line_start": row.line_start,
+                "line_end": row.line_end,
+                "finding_type": row.finding_type,
+                "source_endpoint": row.source_endpoint,
+            }
+            for row in rows
+        ]
+
     async def get_file_metadata(self, repo_id: str, file_path: str) -> Optional[Dict[str, Any]]:
         # Suffix match so a query naming "calculator.py" resolves to the
         # indexed "src/calculator.py" (mirrors get_symbols_for_file).
@@ -131,9 +289,84 @@ class RepositoryFacade(
         return self.vector_store.keyword_search(repo_id, query, top_k)
 
     def hybrid_search(self, repo_id: str, query: str, top_k: int = 10) -> List[RetrievedEvidenceItem]:
+        cached = self._cached_retrieval(repo_id, "hybrid", query, top_k, {})
+        if cached is not None:
+            return cached
         candidates = self.vector_store.hybrid_search(repo_id, query, top_k=top_k * 2)
         reranked = self.reranker.rerank(query, candidates, top_k=top_k)
-        return self.context_assembler.assemble(reranked)
+        results = self.context_assembler.assemble(reranked)
+        self._cache_retrieval(repo_id, "hybrid", query, top_k, {}, results)
+        return results
+
+    def hyde_search(
+        self,
+        repo_id: str,
+        query: str,
+        hypothetical_document: str,
+        top_k: int = 10,
+    ) -> List[RetrievedEvidenceItem]:
+        options = {"hypothetical_document": hypothetical_document}
+        cached = self._cached_retrieval(repo_id, "hyde", query, top_k, options)
+        if cached is not None:
+            return cached
+        candidates = self.vector_store.hybrid_search(
+            repo_id,
+            query,
+            top_k=top_k * 2,
+            vector_query=hypothetical_document,
+            keyword_query=query,
+        )
+        reranked = self.reranker.rerank(query, candidates, top_k=top_k)
+        results = self.context_assembler.assemble(reranked)
+        self._cache_retrieval(repo_id, "hyde", query, top_k, options, results)
+        return results
+
+    async def multi_query_search(
+        self,
+        repo_id: str,
+        queries: List[str],
+        top_k: int = 10,
+        ranking_query: Optional[str] = None,
+    ) -> List[RetrievedEvidenceItem]:
+        options = {"queries": queries, "ranking_query": ranking_query}
+        cached = self._cached_retrieval(repo_id, "multi_query", queries, top_k, options)
+        if cached is not None:
+            return cached
+        searches = await asyncio.gather(*(
+            asyncio.to_thread(
+                self.vector_store.hybrid_search,
+                repo_id,
+                query,
+                top_k=top_k * 2,
+            )
+            for query in queries
+        ))
+
+        merged: Dict[str, RetrievedEvidenceItem] = {}
+        for items in searches:
+            for item in items:
+                key = item.chunk_id or (
+                    f"{item.file_path}:{item.line_start}:{item.line_end}:{item.content}"
+                )
+                existing = merged.get(key)
+                if existing is None:
+                    merged[key] = copy.copy(item)
+                    merged[key].retrieval_method = list(item.retrieval_method)
+                    continue
+                existing.relevance_score += item.relevance_score
+                existing.retrieval_method = sorted(
+                    set(existing.retrieval_method) | set(item.retrieval_method)
+                )
+
+        candidates = list(merged.values())
+        reranked = self.reranker.rerank(
+            ranking_query or (queries[0] if queries else ""),
+            candidates,
+            top_k=top_k,
+        )
+        results = self.context_assembler.assemble(reranked)
+        self._cache_retrieval(repo_id, "multi_query", queries, top_k, options, results)
+        return results
 
     async def symbol_graph_neighbors(
         self, repo_id: str, symbol_or_file: str, max_neighbors: int = 10

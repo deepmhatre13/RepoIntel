@@ -49,6 +49,7 @@ export type RepositoryStatus = {
 export type RunDetail = {
   run_id: string;
   status: string;
+  mode?: string | null;
   current_stage?: string | null;
   progress?: number;
   error?: string | null;
@@ -82,6 +83,12 @@ export function getArtifacts(repository_id: string) {
   return apiRequest<{ artifacts: Array<{ artifact_id: number; run_id: string; content: string; version: number; created_at: string; run_status: string }> }>(`/repositories/${repository_id}/artifacts`);
 }
 
+export function generateArtifact(repository_id: string, artifact_type: string = "README") {
+  return apiRequest<{ repository_id: string; run_id: string; artifact_type: string; generated: boolean; warning?: string }>(`/repositories/${repository_id}/artifacts/generate?artifact_type=${encodeURIComponent(artifact_type)}`, {
+    method: "POST",
+  });
+}
+
 export function getDependencies(repository_id: string) {
   return apiRequest<{ dependencies: Array<{ package_name: string; ecosystem: string; version_spec: string; dependency_type: string }> }>(`/repositories/${repository_id}/dependencies`);
 }
@@ -92,6 +99,28 @@ export function getSymbols(repository_id: string) {
 
 export function getGraph(repository_id: string) {
   return apiRequest<{ neighbors: Array<{ source_symbol: string; source_file: string; edge_type: string; target_symbol: string; target_file: string }> }>(`/repositories/${repository_id}/graph`);
+}
+
+export type EvidenceItem = {
+  file_path: string;
+  line_start?: number;
+  line_end?: number;
+  symbol_name?: string;
+  snippet?: string;
+};
+
+export type ProjectUnderstanding = {
+  purpose: string;
+  technologies: string[];
+  architecture: string;
+  key_components: Array<{ name: string; description?: string; file_path?: string; lines?: string }>;
+  entry_points: Array<{ name: string; file_path?: string; lines?: string }>;
+  evidence: EvidenceItem[];
+  degraded?: boolean;
+};
+
+export function getUnderstanding(repository_id: string) {
+  return apiRequest<ProjectUnderstanding>(`/repositories/${repository_id}/understanding`);
 }
 
 export function askRepository(repository_id: string, query: string) {

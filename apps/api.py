@@ -195,6 +195,7 @@ async def _access_check(
 
 class CreateRepoRequest(BaseModel):
     repo_url: str
+    force: bool = False
 
 class ChatRequest(BaseModel):
     query: str
@@ -359,7 +360,7 @@ async def analyze_repository(
         repository_id=repository_id,
         repo_url=req.repo_url,
         mode="FULL",
-        force=False,
+        force=req.force,
         generate_artifact=True,
         current_user=current_user,
     )
@@ -598,6 +599,38 @@ async def get_repository_artifacts(
                 for artifact, run in result.all()
             ],
         }
+
+
+@app.post("/repositories/{repository_id}/artifacts/generate")
+async def generate_repository_artifact_endpoint(
+    repository_id: str,
+    artifact_type: str = "README",
+    current_user: User = Depends(require_user_auth()),
+):
+    """Trigger real LangGraph artifact generation for a repository on demand."""
+    repo = await _access_check(repository_id, current_user)
+    from packages.runtime.pipeline_orchestrator import RepositoryAnalysisPipeline
+    from packages.shared import IngestionManifest
+    import uuid
+
+    run_id = str(uuid.uuid4())
+    pipeline = RepositoryAnalysisPipeline()
+    manifest = IngestionManifest(archetype=repo.archetype or "Codebase")
+    generated, warning = await pipeline._generate_artifact(
+        repo_id=repository_id,
+        repo_url=repo.repo_url,
+        manifest=manifest,
+        artifact_type=artifact_type,
+        run_id=run_id,
+    )
+    return {
+        "repository_id": repository_id,
+        "run_id": run_id,
+        "artifact_type": artifact_type,
+        "generated": generated,
+        "warning": warning,
+    }
+
 
 @app.post("/repositories/{repository_id}/chat")
 async def chat_repository(
@@ -848,9 +881,6 @@ class ReanalyzeRequest(BaseModel):
 
 
 
-# Register the auth router
-app.include_router(auth_router)
-
 # Register the project health router
 try:
     from packages.project_health.api_router import router as project_health_router
@@ -899,6 +929,18 @@ async def get_repository_status(
                 for r in runs
             ],
         }
+
+
+@app.get("/repositories/{repository_id}/understanding")
+async def get_repository_understanding_endpoint(
+    repository_id: str,
+    current_user: User = Depends(require_user_auth()),
+):
+    """Return real AI project understanding output for Task A."""
+    await _access_check(repository_id, current_user)
+    from packages.agentic.agents.repository_understanding import generate_repository_understanding
+    return await generate_repository_understanding(repository_id)
+
 
 
 @app.post("/repositories/{repository_id}/reanalyze")

@@ -21,6 +21,37 @@ def test_reranker():
     assert len(reranked) == 2
     assert reranked[0].file_path == "f2.py"
 
+
+def test_cross_encoder_scores_drive_reranking_without_losing_provenance():
+    class FakeCrossEncoder:
+        def predict(self, pairs, show_progress_bar=False):
+            assert pairs == [
+                ("database setup", "database helper"),
+                ("database setup", "connection pool configuration"),
+            ]
+            return [0.1, 0.9]
+
+    items = [
+        RetrievedEvidenceItem(
+            repo_id="r1", file_path="a.py", symbol_name="db",
+            line_start=1, line_end=2, content="database helper",
+            retrieval_source="hybrid", relevance_score=0.9,
+            chunk_id="chunk-a",
+        ),
+        RetrievedEvidenceItem(
+            repo_id="r1", file_path="b.py", symbol_name="pool",
+            line_start=3, line_end=4, content="connection pool configuration",
+            retrieval_source="hybrid", relevance_score=0.8,
+            chunk_id="chunk-b",
+        ),
+    ]
+
+    reranker = EvidenceReranker(cross_encoder=FakeCrossEncoder())
+    reranked = reranker.rerank("database setup", items, top_k=2)
+
+    assert [item.chunk_id for item in reranked] == ["chunk-b", "chunk-a"]
+    assert reranked[0].file_path == "b.py"
+
 def test_reranker_preserves_provenance():
     """The reranker must not drop chunk_id, file_id, symbol_id, or
     retrieval_method when creating reranked copies (Phase N5/N6 citation fix)."""

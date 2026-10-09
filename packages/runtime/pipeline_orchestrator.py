@@ -59,6 +59,65 @@ from packages.runtime.incremental_indexer import (
 logger = logging.getLogger(__name__)
 
 
+async def _stream_langgraph_events(app, initial_state, config, run_id, event_manager=None):
+    if event_manager is None:
+        from packages.websocket.event_stream import event_stream_manager
+
+        event_manager = event_stream_manager
+
+    final_state = None
+    async for event in app.astream_events(
+        initial_state,
+        config=config,
+        version="v2",
+    ):
+        event_name = event.get("event")
+        if event_name not in {
+            "on_chat_model_stream",
+            "on_chain_start",
+            "on_chain_end",
+        }:
+            continue
+
+        data = event.get("data") or {}
+        parent_ids = event.get("parent_ids") or []
+        if event_name == "on_chain_end" and not parent_ids:
+            output = data.get("output")
+            if isinstance(output, dict):
+                final_state = output
+
+        payload = {
+            "source": "langgraph",
+            "event": event_name,
+            "node": (event.get("metadata") or {}).get("langgraph_node")
+            or event.get("name"),
+            "event_id": event.get("run_id"),
+        }
+        if event_name == "on_chat_model_stream":
+            chunk = data.get("chunk")
+            content = getattr(chunk, "content", "")
+            if isinstance(content, str):
+                payload["token"] = content
+            elif isinstance(content, list):
+                payload["token"] = "".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and isinstance(part.get("text"), str)
+                )
+
+        from packages.websocket.event_stream import EventType
+
+        await event_manager.emit_event(
+            EventType.PROGRESS_UPDATE,
+            run_id,
+            payload,
+        )
+
+    if final_state is None:
+        raise RuntimeError("LangGraph event stream ended without a root graph result")
+    return final_state
+
+
 class RepositoryAnalysisPipeline:
     def __init__(
         self,
@@ -492,10 +551,30 @@ class RepositoryAnalysisPipeline:
             from packages.knowledge.vector_store import VectorStore as _VS
             from packages.knowledge.repository_facade import RepositoryFacade
             from packages.knowledge.models import AgentRunModel, ArtifactModel
+            from packages.knowledge.persistent_memory import open_repository_memory_store
             from packages.agentic import LLMClient, RepoIntelState, build_main_graph
+            from packages.agentic.llm_client import should_run_degraded_artifact_generation
 
             llm_client = LLMClient()
-            if not llm_client.is_available():
+            if (
+                not llm_client.is_available()
+                and not should_run_degraded_artifact_generation()
+            ):
+                async with self.session_factory() as session:
+                    await session.merge(AgentRunModel(
+                        run_id=run_id,
+                        repo_id=repo_id,
+                        status="SKIPPED",
+                        result_json=json.dumps({
+                            "repo_id": repo_id,
+                            "repo_url": repo_url,
+                            "artifact_type": artifact_type,
+                            "review_verdict": "N/A",
+                            "llm_mode": "LLM_UNAVAILABLE",
+                            "degraded": True,
+                        }),
+                    ))
+                    await session.commit()
                 return False, "artifact skipped: Gemini unavailable (no GOOGLE_API_KEY); deterministic indexing completed"
 
             # Reuse the store that already holds this run's indexed chunks.
@@ -506,7 +585,6 @@ class RepositoryAnalysisPipeline:
 
             async with self.session_factory() as session:
                 facade = RepositoryFacade(session, vs)
-                app = build_main_graph(llm_client, facade)
                 initial_state = RepoIntelState(
                     run_id=run_id,
                     thread_id=run_id,
@@ -524,15 +602,36 @@ class RepositoryAnalysisPipeline:
                         "thread_id": run_id,
                         "checkpoint_ns": "artifact_generation",
                         "checkpoint_id": run_id,
-                    }
+                    },
+                    "metadata": {
+                        "run_id": run_id,
+                        "repo_id": repo_id,
+                        "artifact_type": artifact_type,
+                        "langfuse_session_id": run_id,
+                        "langfuse_tags": ["repointel", "artifact_generation"],
+                    },
                 }
-                final_state_dict = await asyncio.wait_for(
-                    app.ainvoke(
-                        initial_state.model_dump(),
-                        config=graph_config,
-                    ),
-                    timeout=max(self.resources.timeout_for_stage("llm") * 4, 60),
+                from packages.shared.langfuse_tracing import (
+                    create_langfuse_callback,
+                    flush_langfuse,
                 )
+                langfuse_handler, langfuse_client = create_langfuse_callback()
+                if langfuse_handler is not None:
+                    graph_config["callbacks"] = [langfuse_handler]
+                async with open_repository_memory_store() as memory_store:
+                    app = build_main_graph(llm_client, facade, store=memory_store)
+                    try:
+                        final_state_dict = await asyncio.wait_for(
+                            _stream_langgraph_events(
+                                app,
+                                initial_state.model_dump(),
+                                graph_config,
+                                run_id,
+                            ),
+                            timeout=max(self.resources.timeout_for_stage("llm") * 4, 60),
+                        )
+                    finally:
+                        await asyncio.to_thread(flush_langfuse, langfuse_client)
                 final_state = RepoIntelState.model_validate(final_state_dict)
 
                 # Reassemble the grounded README from the graph's artifact draft.
@@ -540,11 +639,14 @@ class RepositoryAnalysisPipeline:
                 total_citations = 0
                 draft = getattr(final_state, "artifact_draft", None)
                 if draft is not None:
-                    lines = []
-                    for sec in draft.sections:
-                        lines.append(f"## {sec.section_title}\n\n{sec.content}\n")
-                        total_citations += len(sec.citations or [])
-                    artifact_content = "\n".join(lines)
+                    from packages.agentic.artifact_rendering import render_artifact
+
+                    artifact_content = render_artifact(
+                        draft, final_state.llm_mode, final_state.degraded
+                    )
+                    total_citations = sum(
+                        len(section.citations or []) for section in draft.sections
+                    )
 
                 verdict = (
                     final_state.review_report.verdict.value
@@ -552,6 +654,7 @@ class RepositoryAnalysisPipeline:
                     else "N/A"
                 )
                 run_errors = list(getattr(final_state, "errors", []) or [])
+                llm_usage = llm_client.get_usage_summary()
 
                 # Durable agent-run record + artifact (join-compatible with the
                 # /artifacts and /repositories/{id}/artifacts endpoints which
@@ -567,11 +670,14 @@ class RepositoryAnalysisPipeline:
                         "repo_url": repo_url,
                         "artifact_type": artifact_type,
                         "review_verdict": verdict,
+                        "llm_mode": final_state.llm_mode,
+                        "degraded": final_state.degraded,
                         "reflection_iterations": getattr(
                             final_state, "reflection_iteration_count", 0
                         ),
                         "citations": total_citations,
                         "errors": run_errors,
+                        "llm_usage": llm_usage,
                     }),
                 ))
                 if artifact_content:

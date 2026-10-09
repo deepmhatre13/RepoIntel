@@ -30,19 +30,39 @@ def load_gitignore_spec(repo_path: str) -> pathspec.PathSpec:
             pass
     return pathspec.PathSpec.from_lines("gitwildmatch", patterns)
 
+
+def _is_within_repository(repository_root: str, path: str) -> bool:
+    try:
+        common = os.path.commonpath((repository_root, path))
+    except ValueError:
+        return False
+    return os.path.normcase(common) == os.path.normcase(repository_root)
+
+
 def filter_repository(repo_path: str) -> list[str]:
     try:
         spec = load_gitignore_spec(repo_path)
     except Exception as exc:
         raise FilteringError(f"Failed to load .gitignore spec: {exc}")
     allowed_files = []
+    repository_root = os.path.realpath(repo_path)
 
     for root, dirs, files in os.walk(repo_path):
         # Prune ignored directory names in-place
-        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS and not d.startswith(".")]
+        dirs[:] = [
+            directory for directory in dirs
+            if directory not in IGNORED_DIRS
+            and not directory.startswith(".")
+            and not os.path.islink(os.path.join(root, directory))
+        ]
         
         for file in files:
             full_path = os.path.join(root, file)
+            if os.path.islink(full_path):
+                continue
+            resolved_path = os.path.realpath(full_path)
+            if not _is_within_repository(repository_root, resolved_path):
+                continue
             rel_path = os.path.relpath(full_path, repo_path).replace("\\", "/")
             
             ext = os.path.splitext(file)[1].lower()

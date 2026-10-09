@@ -18,15 +18,42 @@ from packages.parsing.pipeline import ParsingPipelineResult
 logger = logging.getLogger(__name__)
 
 
-def _validate_embedding(vector: Optional[list], expected_dimension: Optional[int]) -> None:
+def _validate_embedding(
+    vector: Optional[list],
+    expected_dimension: Optional[int],
+    *,
+    repo_id: Optional[str] = None,
+    chunk_id: Optional[int] = None,
+    source: str = "unknown",
+) -> None:
     if vector is None:
         return
     if expected_dimension is not None and len(vector) != expected_dimension:
         raise ValueError(
             f"Embedding dimension mismatch: expected {expected_dimension}, got {len(vector)}"
         )
-    if not all(math.isfinite(float(value)) for value in vector):
-        raise ValueError("Embedding contains a non-finite value")
+    for index, value in enumerate(vector):
+        try:
+            finite = math.isfinite(float(value))
+        except (TypeError, ValueError, OverflowError):
+            sample = list(vector[:5]) if hasattr(vector, "__getitem__") else []
+            logger.error(
+                "Invalid embedding component: repo_id=%s chunk_id=%s source=%s "
+                "value_type=%s length=%s first_element_types=%s "
+                "first_values=%s failing_index=%s failing_value=%r",
+                repo_id,
+                chunk_id,
+                source,
+                type(vector).__name__,
+                len(vector),
+                [type(item).__name__ for item in sample],
+                [repr(item)[:48] for item in sample],
+                index,
+                value,
+            )
+            raise
+        if not finite:
+            raise ValueError("Embedding contains a non-finite value")
 
 
 async def _ensure_repository_row(
@@ -177,7 +204,7 @@ async def upsert_file_result(
                 f"Database safety invariant violation: NUL byte ('\\x00') in chunk content for file '{chunk.file_path}'"
             )
 
-    existing_embeddings: Dict[tuple, list] = {}
+    existing_embeddings: Dict[tuple, tuple[int, list]] = {}
     if embedding_service is not None and embedding_model:
         existing_rows = await session.execute(
             select(CodeChunkModel).where(
@@ -189,10 +216,13 @@ async def upsert_file_result(
                 CodeChunkModel.embedding.isnot(None),
             )
         )
-        existing_embeddings = {
-            (row.content_hash, row.line_start, row.line_end): list(row.embedding)
-            for row in existing_rows.scalars()
-        }
+        existing_embeddings = {}
+        for row in existing_rows.scalars():
+            raw_embedding = row.embedding
+            existing_embeddings[(row.content_hash, row.line_start, row.line_end)] = (
+                row.id,
+                list(raw_embedding),
+            )
 
     await invalidate_file_rows(session, repo_id, [file_path])
 
@@ -244,8 +274,21 @@ async def upsert_file_result(
                 f"Database safety invariant violation: NUL byte ('\\x00') in chunk content for file '{chunk.file_path}'"
             )
         key = (chunk.content_hash, chunk.line_start, chunk.line_end)
-        emb = existing_embeddings.get(key) or generated_by_key.get(key)
-        _validate_embedding(emb, embedding_dimension)
+        reused = existing_embeddings.get(key)
+        if reused is not None:
+            chunk_id, emb = reused
+            embedding_source = "existing_database_row"
+        else:
+            chunk_id = None
+            emb = generated_by_key.get(key)
+            embedding_source = "newly_generated" if emb is not None else "missing"
+        _validate_embedding(
+            emb,
+            embedding_dimension,
+            repo_id=repo_id,
+            chunk_id=chunk_id,
+            source=embedding_source,
+        )
         session.add(CodeChunkModel(
             repo_id=repo_id, file_path=chunk.file_path, symbol_name=chunk.symbol_name,
             line_start=chunk.line_start, line_end=chunk.line_end, content=chunk.content,
